@@ -1,1 +1,16 @@
-/* TODO: Add dock styles. */
+.dock-row.primary.three { grid-template-columns: 1.3fr 1fr 1.2fr; }
+.status { display: grid; gap: 6px; }
+.strip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 12px; background: #10131a; border: 1px solid #222630; border-radius: 10px; color: #a5a9b7; font-size: 12px; line-height: 1.4; }
+.strip.warn { color: #ffb86b; border-color: #4a3a1f; }
+.strip.rec { color: #ff9c9c; border-color: #5a2a2a; }
+.strip-actions { display: flex; flex: none; gap: 6px; }
+.mini { flex: none; padding: 5px 10px; background: transparent; border: 1px solid #2a2f3b; border-radius: 8px; color: #c9cbd6; font-size: 12px; }
+.mini.on { border-color: #a58aff; color: #d5c9ff; }
+.pulse { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #ff6b6b; animation: pulse 1.2s infinite; }
+.tools-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.tile { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 58px; padding: 8px 6px; background: #10131a; border: 1px solid #222630; border-radius: 12px; color: #c9cbd6; font-size: 12px; line-height: 1.2; text-align: center; cursor: pointer; }
+.tile .ico { font-size: 18px; line-height: 1; color: #a991ff; }
+.tile .spin { color: #a991ff; }
+.tile:hover { border-color: #3a3160; }
+.tile.on { background: #1a1730; border-color: #a58aff; color: #e4e0f5; }
+button.tile.is-loading { flex-direction: column; gap: 4px; }
