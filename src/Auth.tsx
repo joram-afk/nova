@@ -46,8 +46,7 @@ export default function Auth() {
     <div className="auth">
       <div className="auth-card">
         <div className="brand-icon">N</div>
-        <h2>{signUp ? 'Create account' : 'Welcome back'}</h2>
-        <p>Sign in to sync your sessions across Windows, web and Android.</p>
+        <h2>{signUp ? 'Create account' : 'Nova Copilot'}</h2>
         <input className="field" type="email" placeholder="Email" autoComplete="email"
           value={email} onChange={e => setEmail(e.target.value)} onKeyDown={enter} />
         <input className="field" type={show ? 'text' : 'password'} placeholder="Password (6+ characters)"
