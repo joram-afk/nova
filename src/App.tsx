@@ -757,7 +757,7 @@ function App() {
           </section>
         )}
 
-        {view === 'dashboard' && <footer><span>NOVA COPILOT · EARLY DEVELOPMENT BUILD</span><span>Web · Android · Windows</span></footer>}
+        {view === 'dashboard' && <footer><span>NOVA COPILOT · Think smart</span><span>Web · Android · Windows</span></footer>}
       </main>
     </div>
   )
