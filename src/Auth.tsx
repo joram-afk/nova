@@ -24,7 +24,7 @@ export default function Auth() {
     if (error) { setError(/already|registered/i.test(error.message) ? EXISTS : error.message); return }
     // Supabase hides duplicates by returning a user with no identities.
     if (signUp && data.user && (data.user.identities?.length ?? 0) === 0) { setError(EXISTS); return }
-    if (signUp && !data.session) setInfo('Please check your email to confirm your account,.')
+    if (signUp && !data.session) setInfo('Please check your email to confirm your account.')
   }
   const ready = Boolean(email.trim()) && password.length >= 6 && (!signUp || confirm.length >= 6)
   async function run() {
@@ -46,7 +46,7 @@ export default function Auth() {
     <div className="auth">
       <div className="auth-card">
         <div className="brand-icon">N</div>
-        <h2>{signUp ? 'Create account' : 'Nova Copilot'}</h2>
+        <h2>{signUp ? 'Create account' : 'Login Nova Copilot'}</h2>
         <input className="field" type="email" placeholder="Email" autoComplete="email"
           value={email} onChange={e => setEmail(e.target.value)} onKeyDown={enter} />
         <input className="field" type={show ? 'text' : 'password'} placeholder="Password (6+ characters)"
