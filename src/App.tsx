@@ -625,7 +625,7 @@ function App() {
             <section className="welcome">
               <span className="eyebrow">{greeting.toUpperCase()}{shownName ? `, ${shownName.toUpperCase()}` : ''}</span>
               <h1>Think clearly.<br /><span>Perform confidently.</span></h1>
-              <p>Your AI assistant for meetings, interviews and important conversations.</p>
+              <p>Your AI assistant for meetings, interviews and important conversations for free.</p>
             </section>
             <section className="stats3">
               <div className="stat"><b>{sessions.length}</b><span>Sessions</span></div>
@@ -637,7 +637,7 @@ function App() {
               <div className="mode-grid">
                 <button className={`mode-card ${mode === 'Meeting' ? 'selected' : ''}`} onClick={() => setMode('Meeting')}>
                   <div className="mode-icon">◉</div><h3>Meeting Assistant</h3>
-                  <p>Follow conversations, capture key points and generate meeting summaries.</p>
+                  <p>Follow conversations, capture key points and generate meeting summaries .</p>
                 </button>
                 <button className={`mode-card ${mode === 'Interview' ? 'selected' : ''}`} onClick={() => setMode('Interview')}>
                   <div className="mode-icon">✧</div><h3>Interview Assistant</h3>
