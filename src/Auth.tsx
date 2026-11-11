@@ -24,7 +24,7 @@ export default function Auth() {
     if (error) { setError(/already|registered/i.test(error.message) ? EXISTS : error.message); return }
     // Supabase hides duplicates by returning a user with no identities.
     if (signUp && data.user && (data.user.identities?.length ?? 0) === 0) { setError(EXISTS); return }
-    if (signUp && !data.session) setInfo('Check your email to confirm your account, then sign in.')
+    if (signUp && !data.session) setInfo('Please check your email to confirm your account,.')
   }
   const ready = Boolean(email.trim()) && password.length >= 6 && (!signUp || confirm.length >= 6)
   async function run() {
@@ -35,10 +35,10 @@ export default function Auth() {
   async function forgot() {
     setError(''); setInfo('')
     const mail = email.trim().toLowerCase()
-    if (!mail) { setError('Type your email above first, then tap Forgot password.'); return }
+    if (!mail) { setError('No email input.'); return }
     const { error } = await supabase.auth.resetPasswordForEmail(mail, { redirectTo: window.location.origin })
     if (error) setError(error.message)
-    else setInfo('If an account exists for that email, a reset link is on its way. Check your inbox and spam folder.')
+    else setInfo('email sent.')
   }
   const enter = (e: React.KeyboardEvent) => { if (e.key === 'Enter') void run() }
 
