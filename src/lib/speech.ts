@@ -1,97 +1,147 @@
-type RecognitionConstructor = new () => any
+import { callAssist } from './assist'
+import type { Mode } from '../types'
+import { downsample, encodeWav, joinChunks, peakLevel } from './audio'
 
-type SpeechError = Event & { error: string }
+// Keep the SpeechRecognition interface used by App.tsx, but capture actual microphone samples
+// and send them to NOVA's authenticated transcription endpoint instead of relying on browser speech services.
+class CloudSpeechRecognition {
+  continuous = true
+  interimResults = true
+  lang = ''
+  onresult: ((event: any) => void) | null = null
+  onerror: ((event: any) => void) | null = null
+  onend: (() => void) | null = null
 
-const nativeRecognition: RecognitionConstructor | undefined =
-  typeof window !== 'undefined'
-    ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    : undefined
+  private active = false
+  private stream: MediaStream | null = null
+  private context: AudioContext | null = null
+  private source: MediaStreamAudioSourceNode | null = null
+  private processor: ScriptProcessorNode | null = null
+  private mute: GainNode | null = null
+  private blocks: Float32Array[] = []
+  private sampleCount = 0
+  private chain: Promise<void> = Promise.resolve()
 
-let microphonePermissionGranted = false
-
-async function requestMicrophonePermission(): Promise<void> {
-  if (microphonePermissionGranted) return
-  if (typeof window === 'undefined' || !window.isSecureContext) {
-    throw new Error('Microphone access requires HTTPS. Open NOVA using its secure Vercel URL.')
+  start(): void {
+    if (this.active) return
+    this.active = true
+    void this.openMicrophone()
   }
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error('Microphone access is unavailable. Use an up-to-date Chrome, Edge, or Safari browser over HTTPS.')
-  }
 
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-  stream.getTracks().forEach(track => track.stop())
-  microphonePermissionGranted = true
-}
+  private async openMicrophone(): Promise<void> {
+    try {
+      if (!window.isSecureContext) throw new Error('Microphone capture requires HTTPS. Open NOVA using its secure Vercel URL.')
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser does not support microphone capture.')
+      if (typeof AudioContext === 'undefined') throw new Error('This browser does not support microphone audio processing.')
 
-function dispatchRecognitionError(recognition: any, error: string) {
-  const event = new Event('error') as SpeechError
-  Object.defineProperty(event, 'error', { value: error })
-  recognition.dispatchEvent(event)
-}
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+      if (!this.active) {
+        stream.getTracks().forEach(track => track.stop())
+        return
+      }
+      this.stream = stream
+      const context = new AudioContext()
+      this.context = context
+      await context.resume()
+      if (!this.active) { await this.release(); return }
 
-function wrapRecognition(Native: RecognitionConstructor): RecognitionConstructor {
-  return new Proxy(Native, {
-    construct(target) {
-      const recognition = Reflect.construct(target, [])
-      let startGeneration = 0
-      let starting = false
-
-      return new Proxy(recognition, {
-        get(target, property) {
-          if (property === 'start') {
-            return () => {
-              if (starting) return
-              starting = true
-              const generation = ++startGeneration
-              void requestMicrophonePermission()
-                .then(() => {
-                  if (generation !== startGeneration) return
-                  try {
-                    target.start()
-                  } catch (error) {
-                    dispatchRecognitionError(target, error instanceof Error ? 'audio-capture' : 'unknown')
-                  }
-                })
-                .catch(error => {
-                  if (generation !== startGeneration) return
-                  const code = error instanceof DOMException && error.name === 'NotAllowedError'
-                    ? 'not-allowed'
-                    : 'audio-capture'
-                  dispatchRecognitionError(target, code)
-                })
-                .finally(() => { starting = false })
-            }
-          }
-          if (property === 'stop' || property === 'abort') {
-            return (...args: unknown[]) => {
-              startGeneration++
-              starting = false
-              return Reflect.get(target, property, target).apply(target, args)
-            }
-          }
-          const value = Reflect.get(target, property, target)
-          return typeof value === 'function' ? value.bind(target) : value
-        },
-        set(target, property, value) {
-          return Reflect.set(target, property, value, target)
-        }
-      })
+      const source = context.createMediaStreamSource(stream)
+      const processor = context.createScriptProcessor(4096, 1, 1)
+      const mute = context.createGain()
+      mute.gain.value = 0
+      this.source = source
+      this.processor = processor
+      this.mute = mute
+      processor.onaudioprocess = event => {
+        if (!this.active) return
+        const input = event.inputBuffer.getChannelData(0)
+        this.blocks.push(new Float32Array(input))
+        this.sampleCount += input.length
+        if (this.sampleCount >= context.sampleRate * 8) this.flushAudio()
+      }
+      source.connect(processor)
+      // A ScriptProcessorNode only runs when connected to an output. Mute its output to avoid feedback.
+      processor.connect(mute)
+      mute.connect(context.destination)
+    } catch (error) {
+      this.active = false
+      this.emitError(error instanceof Error ? error.message : 'Could not access the microphone.', 'not-allowed')
+      await this.release()
+      this.onend?.()
     }
-  }) as RecognitionConstructor
+  }
+
+  stop(): void {
+    if (!this.active) return
+    this.active = false
+    this.flushAudio()
+    void this.chain.finally(async () => {
+      await this.release()
+      this.onend?.()
+    })
+  }
+
+  abort(): void {
+    this.active = false
+    this.blocks = []
+    this.sampleCount = 0
+    void this.release().finally(() => this.onend?.())
+  }
+
+  private flushAudio(): void {
+    if (!this.blocks.length) return
+    const blocks = this.blocks
+    this.blocks = []
+    this.sampleCount = 0
+    this.chain = this.chain.then(async () => {
+      const context = this.context
+      if (!context) return
+      const samples = joinChunks(blocks)
+      if (peakLevel(samples) < 0.015) return
+      const pcm = downsample(samples, context.sampleRate, 16000)
+      if (!pcm.length) return
+      const wav = encodeWav(pcm, 16000)
+      if (wav.size > 4_000_000) throw new Error('The audio chunk is too large to upload.')
+      const audio = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
+        reader.onerror = () => reject(new Error('Could not encode the recorded audio.'))
+        reader.readAsDataURL(wav)
+      })
+      const text = await callAssist({ task: 'transcribe', mode: 'Meeting', audio, mime: 'audio/wav' }, 'Could not transcribe microphone audio')
+      if (!this.active || !text.trim() || /^\[?silence\]?\.?$/i.test(text.trim())) return
+      this.onresult?.({ resultIndex: 0, results: [[{ transcript: text.trim() }]] })
+    }).catch(error => {
+      this.emitError(error instanceof Error ? error.message : 'Microphone transcription failed.', 'network')
+    })
+  }
+
+  private emitError(message: string, code: string): void {
+    const event = new Event('error') as Event & { error: string; message: string }
+    Object.defineProperties(event, { error: { value: code }, message: { value: message } })
+    this.onerror?.(event)
+  }
+
+  private async release(): Promise<void> {
+    if (this.processor) {
+      this.processor.onaudioprocess = null
+      try { this.processor.disconnect() } catch { /* already disconnected */ }
+      this.processor = null
+    }
+    try { this.mute?.disconnect() } catch { /* already disconnected */ }
+    this.mute = null
+    try { this.source?.disconnect() } catch { /* already disconnected */ }
+    this.source = null
+    this.stream?.getTracks().forEach(track => track.stop())
+    this.stream = null
+    if (this.context) {
+      const context = this.context
+      this.context = null
+      try { await context.close() } catch { /* already closed */ }
+    }
+  }
 }
 
-export const SR = nativeRecognition ? wrapRecognition(nativeRecognition) : undefined
-export const speechSupported = Boolean(SR)
-
-export function speechAvailabilityMessage(): string {
-  if (typeof window !== 'undefined' && !window.isSecureContext) {
-    return 'Voice input requires a secure HTTPS connection.'
-  }
-  if (!navigator.mediaDevices?.getUserMedia) {
-    return 'Microphone access is unavailable in this browser. Use current Chrome, Edge, or Safari over HTTPS.'
-  }
-  if (!SR) {
-    return 'Live speech recognition is not supported by this browser. Try current Chrome or Edge, or type a note instead.'
-  }
-  return ''
-}
+export const SR = CloudSpeechRecognition
+export const speechSupported =
+  typeof window !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia) && typeof AudioContext !== 'undefined'
