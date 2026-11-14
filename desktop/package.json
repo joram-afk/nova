@@ -1,1 +1,23 @@
-
+{
+  "name": "nova-desktop",
+  "version": "1.0.0",
+  "description": "NOVA COPILOT desktop shell",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "dist": "electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "app.nova.copilot",
+    "productName": "NOVA Copilot",
+    "files": ["main.js", "logic.js", "preload.js", "overlay.html", "overlay-preload.js"],
+    "win": { "target": "nsis" },
+    "nsis": { "oneClick": true, "perMachine": false }
+  }
+}

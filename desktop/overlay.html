@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+<title>NOVA overlay</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0f1a; color: #e8ecf6; font: 13px/1.45 system-ui, 'Segoe UI', sans-serif; overflow: hidden; }
+  .wrap { display: flex; flex-direction: column; height: 100%; border: 1px solid #2a3350; }
+  header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: #131a2e; -webkit-app-region: drag; user-select: none; }
+  header .title { flex: 1; font-weight: 600; letter-spacing: .04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header button { -webkit-app-region: no-drag; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #55607f; }
+  .dot.on { background: #ff4d4d; box-shadow: 0 0 6px #ff4d4d; }
+  button { background: #1d2745; color: #e8ecf6; border: 1px solid #2a3350; border-radius: 6px; padding: 3px 8px; font: inherit; cursor: pointer; }
+  button:hover { background: #26335c; }
+  button.active { background: #4b5cff; border-color: #4b5cff; }
+  main { flex: 1; overflow-y: auto; padding: 8px 10px; white-space: pre-wrap; word-break: break-word; }
+  main.empty { color: #7d88a8; }
+  .bar { display: flex; gap: 6px; padding: 6px 8px; border-top: 1px solid #2a3350; }
+  .bar input { flex: 1; min-width: 0; background: #0f1527; color: inherit; border: 1px solid #2a3350; border-radius: 6px; padding: 4px 8px; font: inherit; }
+  body.ghost .wrap { opacity: .72; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="dot" id="dot" title="Microphone"></span>
+    <span class="title" id="title">NOVA</span>
+    <button id="lock" title="Click-through: clicks pass to the window underneath. Hover here to turn it off.">⌖</button>
+    <button id="close" title="Hide (Ctrl+Shift+Space)">✕</button>
+  </header>
+  <main id="text" class="empty">Waiting for NOVA…</main>
+  <div class="bar">
+    <input id="note" placeholder="Type a question…" maxlength="2000" />
+    <button id="ask" title="Ctrl+Shift+A">Ask</button>
+    <button id="listen" title="Ctrl+Shift+L">Mic</button>
+    <button id="screen" title="Ctrl+Shift+S">Screen</button>
+  </div>
+</div>
+<script>
+  // Everything from the AI is shown with textContent, so text can never run as code.
+  const $ = id => document.getElementById(id)
+  let clickThrough = false
+  window.overlay.onState(s => {
+    $('dot').classList.toggle('on', s.listening || s.capturing)
+    $('listen').classList.toggle('active', s.listening || s.capturing)
+    $('title').textContent = s.busy ? 'NOVA · thinking…' : (s.title ? 'NOVA · ' + s.title : 'NOVA')
+    const t = $('text')
+    t.textContent = s.text || 'No suggestion yet. Press Mic, then Ask.'
+    t.classList.toggle('empty', !s.text)
+    t.scrollTop = 0
+  })
+  const send = type => window.overlay.action({ type })
+  $('ask').onclick = () => send('ask')
+  $('listen').onclick = () => send('listen')
+  $('screen').onclick = () => send('screen')
+  $('close').onclick = () => window.overlay.hide()
+  $('note').addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || !$('note').value.trim()) return
+    window.overlay.action({ type: 'note', text: $('note').value })
+    $('note').value = ''
+  })
+  // Click-through: the window ignores the mouse, except while the pointer is over the ⌖ button.
+  $('lock').onclick = () => {
+    clickThrough = !clickThrough
+    $('lock').classList.toggle('active', clickThrough)
+    document.body.classList.toggle('ghost', clickThrough)
+    window.overlay.setIgnore(clickThrough)
+  }
+  $('lock').addEventListener('mouseenter', () => { if (clickThrough) window.overlay.setIgnore(false) })
+  $('lock').addEventListener('mouseleave', () => { if (clickThrough) window.overlay.setIgnore(true) })
+</script>
+</body>
+</html>
