@@ -15,6 +15,10 @@ import { DEFAULTS, applyTheme } from './lib/settings'
 import type { Settings } from './lib/settings'
 import './extra.css'
 import './composer.css'
+import './nova-extras.css'
+import { extractPdfText } from './lib/pdf'
+import { LANGS, QUICK, QUICK_KEYS, buildContext, cleanPrep, loadLang, loadLastPrep, loadPrep, MAX_PREP, savePrep, saveLang, srLang } from './lib/prep'
+import type { Lang, QuickKey } from './lib/prep'
 
 type Mode = 'Meeting' | 'Interview'
 type View = 'dashboard' | 'sessions' | 'profile' | 'settings'
@@ -27,6 +31,7 @@ const cloudMicSupported = typeof navigator !== 'undefined' && !!navigator.mediaD
   typeof window !== 'undefined' && !!((window as any).AudioContext || (window as any).webkitAudioContext)
 // Set by the Windows desktop shell (desktop/preload.js). Undefined in a normal browser.
 const desktop: any = typeof window !== 'undefined' ? (window as any).desktop : undefined
+const store: Storage | null = (() => { try { return window.localStorage } catch { return null } })()
 const MIC_CHUNK_MS = 8000
 const MIC_MIN_PEAK = 0.05 // quieter than this counts as silence and is not sent
 interface CloudMic { stream: MediaStream; ctx: AudioContext; node: ScriptProcessorNode; timer: ReturnType<typeof setInterval>; chunks: Float32Array[]; sess: Row | null }
@@ -100,6 +105,13 @@ function App() {
   const capCtxRef = useRef<AudioContext | null>(null)
   const capLevelRef = useRef(0)
   const autoRef = useRef(true)
+  const [chatLang, setChatLang] = useState<Lang>(() => loadLang(store))
+  const langRef = useRef<Lang>(chatLang)
+  const [prep, setPrep] = useState('')
+  const prepRef = useRef('')
+  const [prepOpen, setPrepOpen] = useState(false)
+  const [prepDraft, setPrepDraft] = useState('')
+  const [prepReading, setPrepReading] = useState(false)
   const micRef = useRef<CloudMic | null>(null)
   const sourceRef = useRef<'browser' | 'cloud'>('browser')
   const gotTextRef = useRef(false)
@@ -288,12 +300,45 @@ function App() {
       void askNova()
     }, 3000)
   }
+  function changeLang(l: Lang) { setChatLang(l); langRef.current = l; saveLang(store, l) }
+  function openPrep() { setPrepDraft(prep); setPrepOpen(o => !o) }
+  function commitPrep(text: string) {
+    const a = activeRef.current
+    if (!a) return
+    const clean = savePrep(store, a.id, text)
+    setPrep(clean); prepRef.current = clean; setPrepDraft(clean)
+    flash(clean ? 'Prep saved. NOVA will use it.' : 'Prep cleared.')
+  }
+  async function loadPrepFile(f: File) {
+    const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name)
+    const isText = /\.(txt|md|csv)$/i.test(f.name) || f.type.startsWith('text/')
+    if (!isPdf && !isText) { setError('Prep files must be a PDF or a text file (.txt or .md). For a Word CV, copy its text and paste it here.'); return }
+    setError('')
+    try {
+      let text = ''
+      if (isPdf) {
+        setPrepReading(true)
+        text = await extractPdfText(f)
+        if (!text.trim()) { setError('This PDF has no selectable text (it may be a scan). Copy the text and paste it here instead.'); return }
+      } else text = await f.text()
+      if (text.trim().length > MAX_PREP) flash('Long file: only the first ' + MAX_PREP + ' characters are used.')
+      setPrepDraft(cleanPrep(text))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not read that file.')
+    } finally { setPrepReading(false) }
+  }
+  useEffect(() => {
+    const id = active?.id
+    const v = id ? loadPrep(store, id) : ''
+    setPrep(v); prepRef.current = v; setPrepDraft(v); setPrepOpen(false)
+  }, [active?.id])
+
   function startListening() {
     if (!SR && !cloudMicSupported) return
     setError('')
     wantRef.current = true
     void requestWake()
-    let preferCloud = !SR || Boolean(desktop) // the desktop shell has no live speech service, so go straight to cloud
+    let preferCloud = !SR || Boolean(desktop) || langRef.current === 'mixed' // the desktop shell has no live speech service, so go straight to cloud
     try { if (localStorage.getItem('nova.cloudMic') === '1') preferCloud = true } catch { /* storage blocked */ }
     if (preferCloud && cloudMicSupported) { sourceRef.current = 'cloud'; void startCloudMic() } else startBrowserMic()
   }
@@ -305,7 +350,7 @@ function App() {
     const rec = new SR()
     rec.continuous = true
     rec.interimResults = true
-    rec.lang = settingsRef.current.lang || navigator.language || 'en-US'
+    rec.lang = srLang(langRef.current, settingsRef.current.lang || navigator.language || 'en-US')
     rec.onresult = (e: any) => {
       gotTextRef.current = true
       for (let i = e.resultIndex; i < e.results.length; i++) feed(e.results[i][0].transcript)
@@ -552,7 +597,7 @@ function App() {
       const r = await fetch('/api/assist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.session?.access_token ?? ''}` },
-        body: JSON.stringify({ task: 'transcribe', mode: a.mode, audio: b64, mime: blob.type })
+        body: JSON.stringify({ task: 'transcribe', mode: a.mode, audio: b64, mime: blob.type, lang: langRef.current })
       })
       const j = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(j.error || 'Could not turn the meeting audio into text')
@@ -643,14 +688,18 @@ function App() {
     } catch (e) { setError(e instanceof Error ? e.message : 'Import failed') }
     setImportBusy(false)
   }
-  async function askNova() {
+  async function askNova() { await runAsk(null) }
+  async function askQuick(key: QuickKey) { await runAsk(key) }
+  async function runAsk(quick: QuickKey | null) {
     const a = activeRef.current
     if (!a || busyRef.current) return
     busyRef.current = true; lastAiRef.current = Date.now()
     setAiBusy(true); setError('')
     try {
-      const list = notesRef.current.map(n => ({ kind: n.kind, content: n.content }))
-      const full = list.reduce((n, x) => n + x.content.length, 0) > 12000
+      const base = notesRef.current.map(n => ({ kind: n.kind, content: n.content }))
+      const full = base.reduce((n, x) => n + x.content.length, 0) > 12000
+      // prep, reply language and quick-reply instructions ride along with the request but are not saved as notes
+      const list = [...base, ...buildContext({ prep: prepRef.current, lang: langRef.current, quick })]
       const text = await requestAi(a.mode, list, full)
       const { error } = await supabase.from('notes').insert({ session_id: a.id, content: text, kind: 'ai' })
       if (error) throw new Error(error.message)
@@ -828,7 +877,26 @@ function App() {
               <button className="ghost" onClick={() => void copyText(sessionText())}>⧉ Copy all</button>
               <button className="ghost" onClick={exportTxt}>⇩ Export</button>
               <LoadButton className="ghost" onClick={() => learnFrom(active, notes, true)}>✧ Learn</LoadButton>
+              <button className="ghost" onClick={openPrep}>{prep ? '📎 Prep ✓' : '📎 Prep'}</button>
+              <select className="lang-select" value={chatLang} onChange={e => changeLang(e.target.value as Lang)} aria-label="Language">
+                {LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+              </select>
             </div>
+            {prepOpen && (
+              <div className="prep-panel">
+                <p>Load a PDF or text file, or paste your CV, the job description or any notes. NOVA uses them to tailor its answers in this session.</p>
+                <textarea value={prepDraft} maxLength={MAX_PREP} onChange={e => setPrepDraft(e.target.value)} placeholder="e.g. I am a data analyst with 3 years of experience. The job is…" />
+                <div className="prep-row">
+                  <button className="ghost" onClick={() => { commitPrep(prepDraft); setPrepOpen(false) }}>Save</button>
+                  <label className="ghost" style={{ cursor: 'pointer' }}>{prepReading ? 'Reading PDF…' : 'Load PDF or .txt'}
+                    <input type="file" accept=".pdf,application/pdf,.txt,.md,.csv,text/plain" hidden disabled={prepReading} onChange={e => { const f = e.target.files?.[0]; if (f) void loadPrepFile(f); e.target.value = '' }} />
+                  </label>
+                  {loadLastPrep(store) && loadLastPrep(store) !== prepDraft && <button className="ghost" onClick={() => setPrepDraft(loadLastPrep(store))}>Use my last prep</button>}
+                  {prepDraft && <button className="ghost" onClick={() => { setPrepDraft(''); commitPrep('') }}>Clear</button>}
+                  <span className="prep-count">{prepDraft.length}/{MAX_PREP}</span>
+                </div>
+              </div>
+            )}
 
             <div className="feed">
               {notes.length === 0 && !interim && (
@@ -840,6 +908,11 @@ function App() {
               {notes.map(n => n.kind === 'ai' ? (
                 <div className="bubble ai" key={n.id}>
                   <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div><div className="ai-title">{active.title}</div>{renderAi(n.content)}
+                  {n.id === latestAi?.id && (
+                    <div className="quick-row">
+                      {QUICK_KEYS.map(k => <button key={k} disabled={aiBusy} onClick={() => void askQuick(k)}>{QUICK[k].label}</button>)}
+                    </div>
+                  )}
                 </div>
               ) : n.kind === 'screen' ? (
                 <div className="bubble screen" key={n.id}>
