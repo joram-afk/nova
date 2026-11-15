@@ -1,0 +1,12 @@
+/* Prep panel, language picker and quick-reply buttons */
+.quick-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.quick-row button { background: transparent; color: inherit; border: 1px solid rgba(128, 128, 160, .45); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; opacity: .85; }
+.quick-row button:hover:not(:disabled) { opacity: 1; background: rgba(128, 128, 160, .18); }
+.quick-row button:disabled { opacity: .4; cursor: default; }
+.prep-panel { margin: 8px 0; padding: 10px; border: 1px solid rgba(128, 128, 160, .35); border-radius: 10px; }
+.prep-panel textarea { width: 100%; min-height: 120px; resize: vertical; background: transparent; color: inherit; border: 1px solid rgba(128, 128, 160, .35); border-radius: 8px; padding: 8px; font: inherit; box-sizing: border-box; }
+.prep-panel .prep-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; align-items: center; }
+.prep-panel .prep-count { margin-left: auto; font-size: 12px; opacity: .7; }
+.prep-panel p { margin: 0 0 8px; font-size: 13px; opacity: .8; }
+.lang-select { background: transparent; color: inherit; border: 1px solid rgba(128, 128, 160, .45); border-radius: 8px; padding: 4px 8px; font: inherit; }
+.lang-select option { color: #111; }
