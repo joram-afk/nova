@@ -111,7 +111,7 @@ export default function SettingsPage({ settings, onChange }: Props) {
 
       <div className="card">
         <h3>About</h3>
-        <p>NOVA Copilot, early development build. Your settings are saved to your account and follow you across devices.</p>
+        <p>NOVA Copilot, an early development build by Joe for any interviews or meetings all in one place.All rights reserved.</p>
       </div>
     </section>
   )
