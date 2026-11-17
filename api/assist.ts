@@ -1,4 +1,4 @@
-// Vercel serverless function: keeps the Gemini key on the server.
+// Vercel serverless function: keeps the AI keys on the server.
 export const config = { maxDuration: 60 }
 
 // ---------------------------------------------------------------------------------------------
@@ -46,6 +46,151 @@ const MODELS: Record<Brain, string[]> = {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Backup providers (free tiers). Gemini is tried first. When it is out of quota, too slow or failing, the request
+// moves on to these in order. A provider is used only when its key is set in Vercel:
+//   GROQ_API_KEY        chat (Llama / GPT-OSS) and speech-to-text (Whisper)
+//   CEREBRAS_API_KEY    also needs CEREBRAS_MODELS, a comma list of model ids from your Cerebras account
+//   MISTRAL_API_KEY     chat
+//   OPENROUTER_API_KEY  chat and images, using OpenRouter's free-models router
+// Optional overrides (comma lists): GROQ_MODELS, MISTRAL_MODELS, OPENROUTER_MODELS,
+//   GROQ_VISION_MODEL, MISTRAL_VISION_MODEL, OPENROUTER_VISION_MODELS
+// ---------------------------------------------------------------------------------------------
+const list = (v: string | undefined, fallback: string[]): string[] => {
+  const x = (v || '').split(',').map(s => s.trim()).filter(Boolean)
+  return x.length ? x : fallback
+}
+
+interface Backup { key: string; base: string; apiKey: string; models: string[]; vision: string[] }
+
+function backups(): Backup[] {
+  const env = process.env
+  const out: Backup[] = []
+  if (env.GROQ_API_KEY) out.push({ key: 'groq', base: 'https://api.groq.com/openai/v1', apiKey: env.GROQ_API_KEY, models: list(env.GROQ_MODELS, ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'llama-3.1-8b-instant']), vision: list(env.GROQ_VISION_MODEL, []) })
+  if (env.CEREBRAS_API_KEY && env.CEREBRAS_MODELS) out.push({ key: 'cerebras', base: 'https://api.cerebras.ai/v1', apiKey: env.CEREBRAS_API_KEY, models: list(env.CEREBRAS_MODELS, []), vision: [] })
+  if (env.MISTRAL_API_KEY) out.push({ key: 'mistral', base: 'https://api.mistral.ai/v1', apiKey: env.MISTRAL_API_KEY, models: list(env.MISTRAL_MODELS, ['mistral-small-latest']), vision: list(env.MISTRAL_VISION_MODEL, []) })
+  if (env.OPENROUTER_API_KEY) out.push({ key: 'openrouter', base: 'https://openrouter.ai/api/v1', apiKey: env.OPENROUTER_API_KEY, models: list(env.OPENROUTER_MODELS, ['openrouter/free']), vision: list(env.OPENROUTER_VISION_MODELS, ['openrouter/free']) })
+  return out
+}
+
+// A provider that just said "too many requests" is skipped for a while, so later requests do not wait on it.
+// This lives in memory on a warm server instance, which is good enough to save most of the wasted waiting.
+const coolUntil: Record<string, number> = {}
+const isCooling = (key: string) => Date.now() < (coolUntil[key] || 0)
+function cool(key: string, res: any, fallbackMs = 60000) {
+  const secs = Number(res?.headers?.get?.('retry-after'))
+  const ms = Number.isFinite(secs) && secs > 0 ? Math.min(secs * 1000, 30 * 60000) : fallbackMs
+  coolUntil[key] = Date.now() + ms
+}
+
+// Backups only get the most recent part of long text: free tiers have small per-minute token limits.
+const BACKUP_TEXT_CHARS = 20000
+
+// A JSON-array answer ("learn") must be an array. Backup models sometimes wrap it in text or code fences.
+function asJsonArray(s: string): string {
+  const m = s.match(/\[[\s\S]*\]/)
+  if (!m) return '[]'
+  try { const v = JSON.parse(m[0]); return Array.isArray(v) ? JSON.stringify(v) : '[]' } catch { return '[]' }
+}
+
+interface BackupJob {
+  task: TaskName
+  system: string
+  text: string
+  image: string
+  audio: string
+  audioMime: string
+  lang: string
+  tokens: number
+  wantsJson: boolean
+  deadline: number // timestamp after which we stop trying
+}
+
+const remaining = (job: BackupJob) => job.deadline - Date.now()
+
+async function groqTranscribe(job: BackupJob): Promise<string | null> {
+  const key = process.env.GROQ_API_KEY
+  if (!key || isCooling('groq-stt')) return null
+  const bytes = Uint8Array.from(atob(job.audio), c => c.charCodeAt(0))
+  const m = job.audioMime
+  const ext = m.includes('wav') ? 'wav' : m.includes('mp4') || m.includes('m4a') || m.includes('aac') ? 'm4a' : m.includes('ogg') ? 'ogg' : m.includes('mpeg') || m.includes('mp3') ? 'mp3' : 'webm'
+  for (const model of list(process.env.GROQ_STT_MODELS, ['whisper-large-v3-turbo', 'whisper-large-v3'])) {
+    const ms = Math.min(20000, remaining(job))
+    if (ms < 3000) return null
+    const form = new FormData()
+    form.append('file', new Blob([bytes], { type: m }), `audio.${ext}`)
+    form.append('model', model)
+    form.append('response_format', 'json')
+    form.append('temperature', '0')
+    if (job.lang === 'en' || job.lang === 'sw') form.append('language', job.lang) // mixed speech: let Whisper detect
+    const t0 = Date.now()
+    try {
+      const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(ms) })
+      console.log(`assist backup task=transcribe provider=groq model=${model} status=${r.status} ms=${Date.now() - t0}`)
+      if (r.status === 429) { cool('groq-stt', r); return null }
+      if (r.status === 401 || r.status === 403) return null
+      if (!r.ok) continue
+      const j: any = await r.json().catch(() => ({}))
+      const t = typeof j?.text === 'string' ? j.text.trim() : ''
+      return t || '[silence]'
+    } catch (e: any) {
+      console.log('assist backup failed transcribe groq', model, e?.name, Date.now() - t0, 'ms')
+    }
+  }
+  return null
+}
+
+async function backupChat(job: BackupJob): Promise<{ text: string; via: string } | null> {
+  const wantsImage = job.task === 'screen'
+  for (const b of backups()) {
+    if (isCooling(b.key)) continue
+    const models = wantsImage ? b.vision : b.models
+    if (!models.length) continue
+    const user: any = wantsImage
+      ? [{ type: 'text', text: 'Read this screen.' }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${job.image}` } }]
+      : job.text.slice(-BACKUP_TEXT_CHARS)
+    for (const model of models) {
+      const ms = Math.min(20000, remaining(job))
+      if (ms < 3000) return null
+      const t0 = Date.now()
+      try {
+        const r = await fetch(`${b.base}/chat/completions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${b.apiKey}`, 'content-type': 'application/json', ...(b.key === 'openrouter' ? { 'X-Title': 'NOVA Copilot' } : {}) },
+          signal: AbortSignal.timeout(ms),
+          body: JSON.stringify({ model, max_tokens: job.tokens, temperature: 0.3, messages: [{ role: 'system', content: job.system }, { role: 'user', content: user }] })
+        })
+        console.log(`assist backup task=${job.task} provider=${b.key} model=${model} status=${r.status} ms=${Date.now() - t0}`)
+        if (r.status === 429) { cool(b.key, r); break } // this provider is out for now: go to the next provider
+        if (r.status === 401 || r.status === 403) break // bad or missing key: skip the provider
+        if (!r.ok) continue // maybe a retired model name: try its next model
+        const j: any = await r.json().catch(() => ({}))
+        const raw = j?.choices?.[0]?.message?.content
+        const text = (typeof raw === 'string' ? raw : '').trim()
+        if (!text) continue
+        return { text: job.wantsJson ? asJsonArray(text) : text, via: b.key }
+      } catch (e: any) {
+        console.log('assist backup failed', job.task, b.key, model, e?.name, Date.now() - t0, 'ms')
+      }
+    }
+  }
+  return null
+}
+
+// Is there any backup that could handle this kind of job?
+function hasBackup(task: TaskName): boolean {
+  if (task === 'transcribe') return Boolean(process.env.GROQ_API_KEY)
+  return backups().some(b => (task === 'screen' ? b.vision : b.models).length > 0)
+}
+
+async function tryBackups(job: BackupJob): Promise<{ text: string; via: string } | null> {
+  if (job.task === 'transcribe') {
+    const t = await groqTranscribe(job)
+    return t === null ? null : { text: t, via: 'groq' }
+  }
+  return backupChat(job)
+}
+
+// ---------------------------------------------------------------------------------------------
 // Tasks. To add a new kind of AI job, add one entry here and send its name as `task` from the app.
 // ---------------------------------------------------------------------------------------------
 type TaskName = 'assist' | 'summary' | 'transcribe' | 'screen' | 'learn'
@@ -73,11 +218,13 @@ function isTask(v: unknown): v is TaskName {
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' })
+  const began = Date.now()
 
   const url = process.env.VITE_SUPABASE_URL
   const anon = process.env.VITE_SUPABASE_ANON_KEY
   const apiKey = process.env.GEMINI_API_KEY
-  if (!url || !anon || !apiKey) return res.status(500).json({ error: 'Server is not configured' })
+  const anyBackup = backups().length > 0
+  if (!url || !anon || (!apiKey && !anyBackup)) return res.status(500).json({ error: 'Server is not configured' })
 
   // Only signed-in users may spend AI credits.
   const token = String(req.headers.authorization || '').replace('Bearer ', '')
@@ -104,6 +251,7 @@ export default async function handler(req: any, res: any) {
   const audio = typeof body?.audio === 'string' && body.audio.length < 4200000 ? body.audio : ''
   const audioMime = typeof body?.mime === 'string' && body.mime.startsWith('audio/') ? body.mime.split(';')[0] : 'audio/webm'
   const image = typeof body?.image === 'string' && body.image.length < 4000000 ? body.image : ''
+  const lang = body?.lang === 'sw' || body?.lang === 'mixed' || body?.lang === 'en' ? body.lang : ''
 
   // The app sends `task`. Older app versions sent flags (learn / audio / image / full), so still understand those.
   let task: TaskName = isTask(body?.task)
@@ -125,7 +273,10 @@ export default async function handler(req: any, res: any) {
   const context =
     (userName ? `\n\nThe user's name is ${userName}.` : '') +
     (about ? `\n\nBackground the user shared about themselves (use only when relevant; never invent beyond it):\n${about}` : '')
-  const system = cfg.system(mode, style, context)
+  const langHint = task === 'transcribe'
+    ? lang === 'sw' ? ' The speech is in Kiswahili.' : lang === 'mixed' ? ' The speech may mix English and Kiswahili. Write each word in the language it was spoken in.' : ''
+    : ''
+  const system = cfg.system(mode, style, context) + langHint
 
   const chain: Brain = cfg.fastOnly ? 'fast' : brain
   const models = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL, ...MODELS[chain]] : MODELS[chain]
@@ -138,7 +289,7 @@ export default async function handler(req: any, res: any) {
   const ask = (model: string, thinking: boolean) =>
     fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: 'POST',
-      headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
+      headers: { 'x-goog-api-key': apiKey as string, 'content-type': 'application/json' },
       signal: AbortSignal.timeout(limit),
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
@@ -147,26 +298,56 @@ export default async function handler(req: any, res: any) {
       })
     })
 
-  let r: any = null
-  const start = Date.now()
-  for (const m of models) {
-    if (Date.now() - start > 30000) break
-    const t0 = Date.now()
-    try {
-      r = await ask(m, true)
-      if (r.status === 400) r = await ask(m, false) // model may not support thinking levels
-      console.log(`assist task=${task} model=${m} brain=${brain} status=${r.status} ms=${Date.now() - t0}`)
-      if (r.ok) break
-    } catch (e: any) {
-      console.log('assist failed', task, m, e?.name, Date.now() - t0, 'ms')
-      r = null
+  // Gemini: walk through its models until one answers.
+  const runGemini = async () => {
+    let r: any = null
+    if (!apiKey) return { r, data: {} as any, out: '' }
+    const start = Date.now()
+    for (const m of models) {
+      if (Date.now() - start > 30000) break
+      const t0 = Date.now()
+      try {
+        r = await ask(m, true)
+        if (r.status === 400) r = await ask(m, false) // model may not support thinking levels
+        console.log(`assist task=${task} model=${m} brain=${brain} status=${r.status} ms=${Date.now() - t0}`)
+        if (r.ok) break
+      } catch (e: any) {
+        console.log('assist failed', task, m, e?.name, Date.now() - t0, 'ms')
+        r = null
+      }
     }
+    const data: any = r ? await r.json().catch(() => ({})) : {}
+    const out = r?.ok ? (data.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join('').trim() : ''
+    return { r, data, out }
   }
-  if (!r) return res.status(504).json({ error: 'The AI took too long to answer. Please try again.' })
-  const data: any = await r.json().catch(() => ({}))
-  if (r.status === 429) return res.status(429).json({ error: 'The free AI limit for today is used up on every model. It resets daily. To remove the limit, enable billing in Google AI Studio.' })
-  if (!r.ok) return res.status(502).json({ error: data?.error?.message || 'AI request failed' })
-  const out = (data.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join('').trim()
-  if (!out) return res.status(502).json({ error: 'The AI returned no answer. Try again.' })
-  return res.status(200).json({ text: out })
+
+  const runBackups = () => tryBackups({
+    task, system, text, image, audio, audioMime, lang,
+    tokens: cfg.tokens, wantsJson: Boolean(cfg.json),
+    deadline: began + 52000 // the function may run for 60 seconds
+  })
+
+  const canBackup = hasBackup(task)
+  const geminiCooling = canBackup && isCooling('gemini')
+
+  // If Gemini hit its limit a moment ago, go straight to the backups and keep Gemini as the last resort.
+  if (geminiCooling) {
+    const alt = await runBackups()
+    if (alt) return res.status(200).json({ text: alt.text, via: alt.via })
+  }
+
+  const g = await runGemini()
+  if (g.out) return res.status(200).json({ text: g.out, via: 'gemini' })
+  if (g.r?.status === 429) coolUntil.gemini = Date.now() + 120000
+
+  // Gemini is out of quota, too slow or failing: try the other free providers in order.
+  if (canBackup && !geminiCooling) {
+    const alt = await runBackups()
+    if (alt) return res.status(200).json({ text: alt.text, via: alt.via })
+  }
+
+  if (!g.r) return res.status(apiKey ? 504 : 502).json({ error: apiKey ? 'The AI took too long to answer. Please try again.' : 'No AI provider could answer this. Try again shortly.' })
+  if (g.r.status === 429) return res.status(429).json({ error: canBackup ? 'The free AI limit is used up on every provider for now. It resets daily. Try again later.' : 'The free AI limit for today is used up on every model. It resets daily. To remove the limit, enable billing in Google AI Studio, or add another provider key in Vercel (GROQ_API_KEY).' })
+  if (!g.r.ok) return res.status(502).json({ error: g.data?.error?.message || 'AI request failed' })
+  return res.status(502).json({ error: 'The AI returned no answer. Try again.' })
 }
