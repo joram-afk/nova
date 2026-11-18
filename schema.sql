@@ -11,7 +11,7 @@ create table public.notes (
   session_id uuid not null references public.sessions(id) on delete cascade,
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
   content text not null,
-  kind text not null default 'note' check (kind in ('note','transcript','ai')),
+  kind text not null default 'note' check (kind in ('note','transcript','ai','screen')),
   created_at timestamptz not null default now()
 );
 
