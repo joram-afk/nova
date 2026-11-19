@@ -5,7 +5,7 @@ export const config = { maxDuration: 60 }
 // Prompts
 // ---------------------------------------------------------------------------------------------
 const FULL_MEETING =
-  'You are NOVA, summarizing a full meeting transcript. Reply in plain text with these sections: **Overview** (3-4 sentences), **Key discussion points** (short bullets), **Decisions made**, **Action items** (owner and deadline if stated), **Open questions**. Use only what is in the transcript and name speakers when the transcript gives names. Be concise and precise.'
+  'You are NOVA, summarizing the full transcript of a meeting, lecture, class, call or conversation. Reply in plain text using only the sections that fit: **Overview** (3-4 sentences), **Key discussion points** or **Key ideas** (short bullets), **Decisions made** (meetings only), **Action items** (owner and deadline if stated), **Open questions**. For a lecture or class also add **Terms explained** and **Likely exam points**. Use only what is in the transcript and name speakers when the transcript gives names. Be concise and precise.'
 
 const LEARN =
   'You extract lasting facts about the USER from a session so an assistant can personalise future help. Facts must be about the user themselves: skills, education, experience, projects, goals, interests, preferences, languages, how they like answers. Lines starting with USER NOTE are the user. Lines starting with HEARD may include other people, so ignore anything about anyone else and anything you are unsure the user said about themselves. Never include sensitive data (health, money, passwords, ID numbers, exact location, relationships, politics, religion) or temporary details. Do not repeat facts already known. Output ONLY a JSON array of up to 4 short strings, each under 140 characters, or [] if there is nothing lasting.'
@@ -28,11 +28,16 @@ const MISHEARD_LEARN =
 const SPELLING_HINT =
   ' Use the background below ONLY to spell names and technical terms correctly when you hear them. Never add words that were not spoken.'
 
+// Shared by both modes. The mode name is only a starting point: the real situation can be anything in daily life,
+// and the assistant should think past the obvious answer.
+const WIDE =
+  ' The setting can be anything in daily life, not only a meeting or an interview: a lecture or class, a phone call, a chat with family or friends, shopping, travel, a negotiation, a visit to a doctor or bank, a debate, a game, a repair, cooking, a business idea, or something else. First work out what is really going on (who is speaking, what each person wants, what is at stake) and do not assume the mode name describes the situation. Be genuinely smart: go beyond the obvious and offer the angle the user would not think of, such as a hidden assumption, a sharper question to ask, a risk or opportunity others would miss, or a creative alternative. When it adds real value, end with one line starting **Another angle:** with that idea, and skip it when there is nothing worth adding. When a question is asked, answer it directly and correctly first, even if it is general knowledge. For medical, legal or money topics give clear, useful information and say briefly when a professional should be consulted.'
+
 const PROMPTS: Record<string, string> = {
   Meeting:
-    'You are NOVA, a sharp meeting assistant. Using the transcript and notes, reply in plain text with: **Summary** (2-3 sentences), **Key points** (short bullets), **Action items** (owner if mentioned) and, only if useful, **Watch out** (risks or unanswered questions). Be precise and never invent facts. Lines starting with ON SCREEN were read from the user\'s screen.',
+    'You are NOVA, a sharp live assistant. Using the transcript and notes, reply in plain text using only the headings that fit the situation: **Summary** (2-3 sentences), **Key points** (short bullets), **Action items** (owner if mentioned) and, only if useful, **Watch out** (risks or unanswered questions). For a lecture or class use **Key ideas** and simple explanations of hard terms instead. Be precise and never invent facts about what was actually said. Lines starting with ON SCREEN were read from the user\'s screen.' + WIDE,
   Interview:
-    'You are NOVA, an expert interview coach helping the user answer live. Find the most recent question (lines starting with HEARD, or ON SCREEN if the screen shows a question). Reply in plain text with: **Question type** (behavioral, technical, situational or general), **What they want** (one line), **Answer outline** (3-4 short bullets in the order to say them; use the STAR structure for behavioral questions) and **Opening line** the user can start with. Ground examples in the background the user shared. If it has nothing relevant, say so briefly and give an honest framework instead of inventing experience or credentials. Be concise.'
+    'You are NOVA, an expert interview coach helping the user answer live. Find the most recent question (lines starting with HEARD, or ON SCREEN if the screen shows a question). Reply in plain text with: **Question type** (behavioral, technical, situational or general), **What they want** (one line), **Answer outline** (3-4 short bullets in the order to say them; use the STAR structure for behavioral questions) and **Opening line** the user can start with. Ground examples in the background the user shared. If it has nothing relevant, say so briefly and give an honest framework instead of inventing experience or credentials. When it fits, make **Another angle** a standout move, such as a sharp question to ask the interviewer or a detail that sets the user apart. If the conversation is not an interview, or the latest question is not an interview question, skip this format and help with what is actually happening. Be concise.' + WIDE
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -52,8 +57,9 @@ const MODELS: Record<Brain, string[]> = {
 //   CEREBRAS_API_KEY    also needs CEREBRAS_MODELS, a comma list of model ids from your Cerebras account
 //   MISTRAL_API_KEY     chat
 //   OPENROUTER_API_KEY  chat and images, using OpenRouter's free-models router
+//   NVIDIA_API_KEY      chat (build.nvidia.com free developer credits). Credits run out, so it is tried last.
 // Optional overrides (comma lists): GROQ_MODELS, MISTRAL_MODELS, OPENROUTER_MODELS,
-//   GROQ_VISION_MODEL, MISTRAL_VISION_MODEL, OPENROUTER_VISION_MODELS
+//   NVIDIA_MODELS, GROQ_VISION_MODEL, MISTRAL_VISION_MODEL, OPENROUTER_VISION_MODELS, NVIDIA_VISION_MODELS
 // ---------------------------------------------------------------------------------------------
 const list = (v: string | undefined, fallback: string[]): string[] => {
   const x = (v || '').split(',').map(s => s.trim()).filter(Boolean)
@@ -69,6 +75,7 @@ function backups(): Backup[] {
   if (env.CEREBRAS_API_KEY && env.CEREBRAS_MODELS) out.push({ key: 'cerebras', base: 'https://api.cerebras.ai/v1', apiKey: env.CEREBRAS_API_KEY, models: list(env.CEREBRAS_MODELS, []), vision: [] })
   if (env.MISTRAL_API_KEY) out.push({ key: 'mistral', base: 'https://api.mistral.ai/v1', apiKey: env.MISTRAL_API_KEY, models: list(env.MISTRAL_MODELS, ['mistral-small-latest']), vision: list(env.MISTRAL_VISION_MODEL, []) })
   if (env.OPENROUTER_API_KEY) out.push({ key: 'openrouter', base: 'https://openrouter.ai/api/v1', apiKey: env.OPENROUTER_API_KEY, models: list(env.OPENROUTER_MODELS, ['openrouter/free']), vision: list(env.OPENROUTER_VISION_MODELS, ['openrouter/free']) })
+  if (env.NVIDIA_API_KEY) out.push({ key: 'nvidia', base: 'https://integrate.api.nvidia.com/v1', apiKey: env.NVIDIA_API_KEY, models: list(env.NVIDIA_MODELS, ['meta/llama-3.3-70b-instruct']), vision: list(env.NVIDIA_VISION_MODELS, []) })
   return out
 }
 
@@ -162,6 +169,7 @@ async function backupChat(job: BackupJob): Promise<{ text: string; via: string }
         console.log(`assist backup task=${job.task} provider=${b.key} model=${model} status=${r.status} ms=${Date.now() - t0}`)
         if (r.status === 429) { cool(b.key, r); break } // this provider is out for now: go to the next provider
         if (r.status === 401 || r.status === 403) break // bad or missing key: skip the provider
+        if (r.status === 402) { cool(b.key, null, 6 * 3600000); break } // credits used up: stop trying for hours
         if (!r.ok) continue // maybe a retired model name: try its next model
         const j: any = await r.json().catch(() => ({}))
         const raw = j?.choices?.[0]?.message?.content
