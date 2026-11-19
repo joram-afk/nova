@@ -33,7 +33,7 @@ const cloudMicSupported = typeof navigator !== 'undefined' && !!navigator.mediaD
 const desktop: any = typeof window !== 'undefined' ? (window as any).desktop : undefined
 const store: Storage | null = (() => { try { return window.localStorage } catch { return null } })()
 const MIC_CHUNK_MS = 8000
-const MIC_MIN_PEAK = 0.05 // quieter than this counts as silence and is not sent
+const MIC_MIN_PEAK = 0.02 // quieter than this counts as silence and is not sent (low enough for a lecture played from the phone speaker)
 interface CloudMic { stream: MediaStream; ctx: AudioContext; node: ScriptProcessorNode; timer: ReturnType<typeof setInterval>; chunks: Float32Array[]; sess: Row | null }
 
 function renderAi(text: string): ReactNode {
@@ -113,6 +113,7 @@ function App() {
   const [prepDraft, setPrepDraft] = useState('')
   const [prepReading, setPrepReading] = useState(false)
   const micRef = useRef<CloudMic | null>(null)
+  const silentRunRef = useRef(0) // how many cloud-mic chunks in a row had no sound
   const sourceRef = useRef<'browser' | 'cloud'>('browser')
   const gotTextRef = useRef(false)
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -391,7 +392,10 @@ function App() {
   // Cloud microphone: collect raw audio, cut it every few seconds, skip silence, send the rest as a WAV file.
   async function startCloudMic() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      // Echo cancellation and noise suppression are OFF on purpose: they treat sound coming out of the phone's own
+      // speaker (a Zoom lecture, a call) as echo and remove it, so the mic would hear nothing. Gain control stays on to lift quiet audio.
+      silentRunRef.current = 0
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } })
       if (!wantRef.current || sourceRef.current !== 'cloud') { stream.getTracks().forEach(t => t.stop()); return }
       const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext
       const ctx: AudioContext = new Ctx()
@@ -418,7 +422,15 @@ function App() {
     const all = joinChunks(m.chunks)
     m.chunks = []
     if (all.length < m.ctx.sampleRate * 1) return // under a second: not worth sending
-    if (peakLevel(all) < MIC_MIN_PEAK) return // silence: save the free AI quota
+    if (peakLevel(all) < MIC_MIN_PEAK) { // silence: save the free AI quota
+      silentRunRef.current += 1
+      if (silentRunRef.current === 3) { // about 24 seconds of nothing: tell the user why this can happen
+        setNotice('NOVA is not hearing any sound. To pick up a lecture or call on this phone, play it through the phone speaker (not earphones or Bluetooth) at a high volume.')
+        setTimeout(() => setNotice(''), 10000)
+      }
+      return
+    }
+    silentRunRef.current = 0
     const wav = encodeWav(downsample(all, m.ctx.sampleRate, 16000), 16000)
     setInterim('Transcribing…')
     void transcribeChunk(wav, m.sess).finally(() => setInterim(''))
