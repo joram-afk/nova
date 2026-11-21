@@ -79,6 +79,28 @@ function backups(): Backup[] {
   return out
 }
 
+// Checking the sign-in token is a network round trip to Supabase on every request. Live suggestions fire every few
+// seconds, so a short cache removes that wait. 20 seconds keeps changes to settings and memory feeling immediate.
+const ACCOUNT_TTL_MS = 20000
+const accountCache = new Map<string, { at: number; account: any }>()
+function cachedAccount(token: string): any | null {
+  const hit = accountCache.get(token)
+  return hit && Date.now() - hit.at < ACCOUNT_TTL_MS ? hit.account : null
+}
+function rememberAccount(token: string, account: any) {
+  if (accountCache.size > 200) accountCache.clear()
+  accountCache.set(token, { at: Date.now(), account })
+}
+
+// Stop waiting on a request when either signal fires (a timeout, or "another provider already answered").
+function anySignal(signals: AbortSignal[]): AbortSignal {
+  const any = (AbortSignal as any).any
+  if (typeof any === 'function') return any.call(AbortSignal, signals)
+  return signals[0]
+}
+
+type Hit = { text: string; via: string }
+
 // A provider that just said "too many requests" is skipped for a while, so later requests do not wait on it.
 // This lives in memory on a warm server instance, which is good enough to save most of the wasted waiting.
 const coolUntil: Record<string, number> = {}
@@ -236,9 +258,13 @@ export default async function handler(req: any, res: any) {
 
   // Only signed-in users may spend AI credits.
   const token = String(req.headers.authorization || '').replace('Bearer ', '')
-  const who = await fetch(`${url}/auth/v1/user`, { headers: { apikey: anon, Authorization: `Bearer ${token}` } })
-  if (!who.ok) return res.status(401).json({ error: 'Please sign in again' })
-  const account: any = await who.json().catch(() => ({}))
+  let account: any = cachedAccount(token)
+  if (!account) {
+    const who = await fetch(`${url}/auth/v1/user`, { headers: { apikey: anon, Authorization: `Bearer ${token}` } })
+    if (!who.ok) return res.status(401).json({ error: 'Please sign in again' })
+    account = await who.json().catch(() => ({}))
+    rememberAccount(token, account)
+  }
   const prefs: any = account?.user_metadata?.settings ?? {}
   const brain: Brain = prefs.brain === 'fast' ? 'fast' : 'smart'
   const memories: string[] = Array.isArray(prefs.memories)
@@ -294,11 +320,12 @@ export default async function handler(req: any, res: any) {
     task === 'transcribe' ? [{ inlineData: { mimeType: audioMime, data: audio } }, { text: 'Transcribe this audio.' }]
     : task === 'screen' ? [{ inlineData: { mimeType: 'image/jpeg', data: image } }, { text: 'Read this screen.' }]
     : [{ text }]
+  const stop = new AbortController() // fired when a backup answers first, so Gemini stops working
   const ask = (model: string, thinking: boolean) =>
     fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: 'POST',
       headers: { 'x-goog-api-key': apiKey as string, 'content-type': 'application/json' },
-      signal: AbortSignal.timeout(limit),
+      signal: anySignal([AbortSignal.timeout(limit), stop.signal]),
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts }],
@@ -312,7 +339,7 @@ export default async function handler(req: any, res: any) {
     if (!apiKey) return { r, data: {} as any, out: '' }
     const start = Date.now()
     for (const m of models) {
-      if (Date.now() - start > 30000) break
+      if (Date.now() - start > 30000 || stop.signal.aborted) break
       const t0 = Date.now()
       try {
         r = await ask(m, true)
@@ -344,12 +371,48 @@ export default async function handler(req: any, res: any) {
     if (alt) return res.status(200).json({ text: alt.text, via: alt.via })
   }
 
-  const g = await runGemini()
-  if (g.out) return res.status(200).json({ text: g.out, via: 'gemini' })
+  // Live answers: if Gemini has not replied after a few seconds, ask a backup provider as well and use whichever
+  // answers first. A slow or stuck Gemini then costs a few seconds instead of half a minute.
+  const hedgeMs = canBackup && !geminiCooling && (task === 'assist' || task === 'learn')
+    ? Number(process.env.NOVA_HEDGE_MS) || (brain === 'smart' ? 9000 : 5000)
+    : 0
+  let backupsTried = geminiCooling
+  let hit: Hit | null = null
+  let g: Awaited<ReturnType<typeof runGemini>>
+
+  if (hedgeMs) {
+    backupsTried = true
+    let backupP: Promise<Hit | null> | null = null
+    const startBackups = () => (backupP ??= runBackups().catch(() => null))
+    const geminiP = runGemini()
+    let tid: ReturnType<typeof setTimeout> | undefined
+    const slow = new Promise<'slow'>(resolve => { tid = setTimeout(() => resolve('slow'), hedgeMs) })
+    const first = await Promise.race([geminiP.then(() => 'done' as const), slow])
+    clearTimeout(tid)
+    if (first === 'done') {
+      g = await geminiP
+      hit = g.out ? { text: g.out, via: 'gemini' } : await startBackups() // Gemini failed quickly: use the backups
+    } else {
+      const bp = startBackups() // Gemini is slow: race a backup against it
+      hit = await new Promise<Hit | null>(resolve => {
+        let open = 2
+        const settle = (h: Hit | null) => { if (h) resolve(h); else if (--open === 0) resolve(null) }
+        geminiP.then(x => settle(x.out ? { text: x.out, via: 'gemini' } : null))
+        bp.then(settle)
+      })
+      if (hit && hit.via !== 'gemini') stop.abort() // a backup won: stop waiting for Gemini
+      g = await geminiP
+    }
+  } else {
+    g = await runGemini()
+    if (g.out) hit = { text: g.out, via: 'gemini' }
+  }
+
   if (g.r?.status === 429) coolUntil.gemini = Date.now() + 120000
+  if (hit) return res.status(200).json({ text: hit.text, via: hit.via })
 
   // Gemini is out of quota, too slow or failing: try the other free providers in order.
-  if (canBackup && !geminiCooling) {
+  if (canBackup && !backupsTried) {
     const alt = await runBackups()
     if (alt) return res.status(200).json({ text: alt.text, via: alt.via })
   }
