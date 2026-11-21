@@ -34,7 +34,13 @@ const desktop: any = typeof window !== 'undefined' ? (window as any).desktop : u
 const store: Storage | null = (() => { try { return window.localStorage } catch { return null } })()
 const MIC_CHUNK_MS = 8000
 const MIC_MIN_PEAK = 0.02 // quieter than this counts as silence and is not sent (low enough for a lecture played from the phone speaker)
-interface CloudMic { stream: MediaStream; ctx: AudioContext; node: ScriptProcessorNode; timer: ReturnType<typeof setInterval>; chunks: Float32Array[]; sess: Row | null }
+interface CloudMic { stream: MediaStream; ctx: AudioContext; node: ScriptProcessorNode; timer: ReturnType<typeof setInterval>; chunks: Float32Array[]; sess: Row | null; meter?: ReturnType<typeof setInterval> }
+
+// A note can arrive after its session was deleted (a slow transcription, an AI answer, a screen read).
+// There is nowhere to save it, so background saves drop it quietly instead of showing a database error.
+const sessionGone = (e: { code?: string; message?: string } | null | undefined) =>
+  !!e && (e.code === '23503' || /foreign key/i.test(e.message || ''))
+const GONE_MESSAGE = 'This session no longer exists. Go back and start a new one.'
 
 function renderAi(text: string): ReactNode {
   const inline = (s: string) =>
@@ -114,6 +120,8 @@ function App() {
   const [prepReading, setPrepReading] = useState(false)
   const micRef = useRef<CloudMic | null>(null)
   const silentRunRef = useRef(0) // how many cloud-mic chunks in a row had no sound
+  const levelRef = useRef(0) // loudness of the latest microphone audio (0 to 1)
+  const [micLevel, setMicLevel] = useState<number | null>(null) // null when the cloud mic is off
   const sourceRef = useRef<'browser' | 'cloud'>('browser')
   const gotTextRef = useRef(false)
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -236,7 +244,7 @@ function App() {
   async function addNote() {
     if (!active || !noteText.trim()) return
     const { error } = await supabase.from('notes').insert({ session_id: active.id, content: noteText.trim() })
-    if (error) { setError(error.message); return }
+    if (error) { setError(sessionGone(error) ? GONE_MESSAGE : error.message); return }
     setNoteText(''); await loadNotes(active.id)
   }
 
@@ -246,7 +254,7 @@ function App() {
     const text = noteText.trim()
     if (text) {
       const { error } = await supabase.from('notes').insert({ session_id: active.id, content: text })
-      if (error) { setError(error.message); return }
+      if (error) { setError(sessionGone(error) ? GONE_MESSAGE : error.message); return }
       setNoteText('')
       await loadNotes(active.id)
     }
@@ -257,7 +265,7 @@ function App() {
     const a = activeRef.current
     if (!a || !text.trim()) return
     const { error } = await supabase.from('notes').insert({ session_id: a.id, content: text.trim(), kind: 'transcript' })
-    if (error) setError(error.message)
+    if (error) { if (!sessionGone(error)) setError(error.message) }
     else { await loadNotes(a.id); scheduleAuto() }
   }
   // Android Chrome re-sends the growing sentence many times ("what", "what is", "what is the").
@@ -405,9 +413,18 @@ function App() {
       const mute = ctx.createGain()
       mute.gain.value = 0 // the processor must be connected to run, but we must not play the mic back
       const m: CloudMic = { stream, ctx, node, chunks: [], timer: setInterval(() => flushMic(m), MIC_CHUNK_MS), sess: activeRef.current }
-      node.onaudioprocess = e => { m.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))) }
+      node.onaudioprocess = e => {
+        const block = e.inputBuffer.getChannelData(0)
+        m.chunks.push(new Float32Array(block))
+        let p = 0
+        for (let i = 0; i < block.length; i++) { const v = Math.abs(block[i]); if (v > p) p = v }
+        levelRef.current = Math.max(p, levelRef.current * 0.8) // rises at once, falls smoothly
+      }
       src.connect(node); node.connect(mute); mute.connect(ctx.destination)
       micRef.current = m
+      levelRef.current = 0
+      setMicLevel(0)
+      m.meter = setInterval(() => setMicLevel(levelRef.current), 150) // drives the sound-level bar
       setListening(true)
     } catch (e) {
       wantRef.current = false
@@ -440,6 +457,8 @@ function App() {
     if (!m) return
     micRef.current = null
     clearInterval(m.timer)
+    if (m.meter) clearInterval(m.meter)
+    setMicLevel(null)
     try { m.node.disconnect() } catch { /* already disconnected */ }
     flushMic(m) // send the last few words
     m.stream.getTracks().forEach(t => t.stop())
@@ -532,8 +551,8 @@ function App() {
       const j = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(j.error || 'Could not read the screen')
       const { error } = await supabase.from('notes').insert({ session_id: a.id, content: j.text, kind: 'screen' })
-      if (error) throw new Error(error.message)
-      await loadNotes(a.id)
+      if (error) { if (!sessionGone(error)) throw new Error(error.message) }
+      else await loadNotes(a.id)
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not read the screen') }
     readBusyRef.current = false; setReadBusy(false)
   }
@@ -616,7 +635,7 @@ function App() {
       const text = String(j.text ?? '').trim()
       if (!text || /^\[?silence\]?\.?$/i.test(text)) return
       const { error } = await supabase.from('notes').insert({ session_id: a.id, content: text, kind: 'transcript' })
-      if (error) throw new Error(error.message)
+      if (error) { if (sessionGone(error)) return; throw new Error(error.message) }
       if (activeRef.current?.id === a.id) { await loadNotes(a.id); scheduleAuto() }
     } catch (e) {
       const m = e instanceof Error ? e.message : 'Audio transcription failed'
@@ -714,8 +733,8 @@ function App() {
       const list = [...base, ...buildContext({ prep: prepRef.current, lang: langRef.current, quick })]
       const text = await requestAi(a.mode, list, full)
       const { error } = await supabase.from('notes').insert({ session_id: a.id, content: text, kind: 'ai' })
-      if (error) throw new Error(error.message)
-      await loadNotes(a.id)
+      if (error) { if (!sessionGone(error)) throw new Error(error.message) }
+      else await loadNotes(a.id)
     } catch (e) {
       const m = e instanceof Error ? e.message : 'AI request failed'
       if (/quota|limit/i.test(m)) pauseRef.current = Date.now() + 10 * 60 * 1000
@@ -732,7 +751,7 @@ function App() {
     const a = activeRef.current
     if (!a || !text.trim()) return
     const { error } = await supabase.from('notes').insert({ session_id: a.id, content: text.trim() })
-    if (error) { setError(error.message); return }
+    if (error) { setError(sessionGone(error) ? GONE_MESSAGE : error.message); return }
     await loadNotes(a.id)
     await new Promise(r => setTimeout(r, 60)) // let the new note reach notesRef before asking
     await askNova()
@@ -941,6 +960,15 @@ function App() {
               <div ref={endRef} className="feed-end" />
             </div>
 
+            {micLevel !== null && (
+              <div className="mic-meter" role="status" aria-label="Microphone sound level">
+                <div className="mic-meter-bar">
+                  <div className="mic-meter-fill" style={{ width: Math.min(100, Math.round(micLevel * 400)) + '%' }} />
+                  <i className="mic-meter-tick" style={{ left: Math.round(MIC_MIN_PEAK * 400) + '%' }} />
+                </div>
+                <span>{micLevel >= MIC_MIN_PEAK ? 'Hearing sound' : 'No sound yet'}</span>
+              </div>
+            )}
             <Dock
               mode={active.mode}
               listening={listening} auto={auto} capturing={capturing} sharing={sharing} watching={watching}
