@@ -10,3 +10,10 @@
 .prep-panel p { margin: 0 0 8px; font-size: 13px; opacity: .8; }
 .lang-select { background: transparent; color: inherit; border: 1px solid rgba(128, 128, 160, .45); border-radius: 8px; padding: 4px 8px; font: inherit; }
 .lang-select option { color: #111; }
+
+/* Live microphone sound-level bar */
+.mic-meter { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; opacity: .9; }
+.mic-meter-bar { position: relative; flex: 1; height: 8px; border-radius: 999px; background: rgba(128, 128, 160, .25); overflow: hidden; }
+.mic-meter-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #3ddc84, #a78bfa); transition: width .12s ease-out; }
+.mic-meter-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255, 255, 255, .6); }
+.mic-meter span { min-width: 92px; text-align: right; }
