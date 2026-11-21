@@ -11,9 +11,48 @@
 .lang-select { background: transparent; color: inherit; border: 1px solid rgba(128, 128, 160, .45); border-radius: 8px; padding: 4px 8px; font: inherit; }
 .lang-select option { color: #111; }
 
+/* ---- One accent colour (the app's purple) for everything added below ---- */
+
 /* Live microphone sound-level bar */
-.mic-meter { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; opacity: .9; }
-.mic-meter-bar { position: relative; flex: 1; height: 8px; border-radius: 999px; background: rgba(128, 128, 160, .25); overflow: hidden; }
-.mic-meter-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #3ddc84, #a78bfa); transition: width .12s ease-out; }
-.mic-meter-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255, 255, 255, .6); }
+.mic-meter { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: #8e93a4; }
+.mic-meter-bar { position: relative; flex: 1; height: 8px; border-radius: 999px; background: #222630; overflow: hidden; }
+.mic-meter-fill { height: 100%; border-radius: 999px; background: #a991ff; transition: width .12s ease-out; }
+.mic-meter-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: #c9cbd6; }
 .mic-meter span { min-width: 92px; text-align: right; }
+
+/* Live session: three-bar menu */
+.session-head { position: relative; }
+.session-head .menu-btn { font-size: 20px; line-height: 1; min-width: 40px; }
+.session-head small { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.menu-backdrop { position: fixed; inset: 0; z-index: 40; background: transparent; }
+.menu-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 41; width: 240px; background: #10131a; border: 1px solid #2a2f3b; border-radius: 12px; overflow: hidden; box-shadow: 0 8px 24px rgba(0, 0, 0, .35); }
+.menu-panel .menu-item { display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; padding: 12px 14px; background: transparent; color: #c9cbd6; border: 0; border-radius: 0; border-top: 1px solid #222630; font: inherit; text-align: left; cursor: pointer; }
+.menu-panel .menu-item:first-child { border-top: 0; }
+.menu-panel .menu-item:hover { background: #1a1730; }
+.menu-panel .menu-row { justify-content: space-between; cursor: default; }
+.menu-panel .menu-row:hover { background: transparent; }
+
+/* Layout: latest answer card (focus view and Live tab) */
+.focus { display: grid; gap: 10px; margin: 8px 0; }
+.latest-card { padding: 16px; background: #1a1730; border: 1px solid #a58aff; border-radius: 14px; }
+.latest-card .focus-text { font-size: 18px; line-height: 1.45; color: #f5f5f7; }
+.latest-card .empty { padding: 10px 0; }
+.focus-heard { padding: 10px 12px; background: #10131a; border: 1px solid #222630; border-radius: 12px; color: #c9cbd6; font-size: 14px; }
+.focus-more { justify-self: start; }
+
+/* Layout: Live / Transcript tabs */
+.tabs-bar { display: flex; gap: 6px; margin: 8px 0; }
+.tabs-bar button { flex: 1; padding: 9px 6px; background: transparent; border: 1px solid #2a2f3b; border-radius: 10px; color: #a5a9b7; font-size: 14px; }
+.tabs-bar button.on { background: #28223b; border-color: #a58aff; color: #d5c9ff; }
+
+/* Layout: dock controls */
+.chat-row { display: flex; align-items: center; gap: 10px; }
+.chat-row .composer { flex: 1; min-width: 0; }
+.mic-round { flex: none; display: grid; place-items: center; width: 54px; height: 54px; padding: 0; border: none; border-radius: 50%; background: #a991ff; color: #171321; font-size: 20px; cursor: pointer; }
+.mic-round.on { background: #28223b; color: #d5c9ff; box-shadow: inset 0 0 0 2px #a991ff; }
+.dock-row.sub { display: flex; align-items: center; gap: 8px; }
+.focus-actions { display: grid; grid-template-columns: 1fr 1.3fr 1fr; gap: 8px; }
+.big-btn { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 52px; padding: 8px 6px; background: #10131a; border: 1px solid #222630; border-radius: 12px; color: #c9cbd6; font-size: 14px; text-align: center; cursor: pointer; }
+.big-btn:disabled { opacity: .5; cursor: default; }
+.big-btn.primary { background: #a991ff; border-color: #a991ff; color: #171321; font-weight: 600; }
+.big-btn.primary.on { background: #28223b; border-color: #a991ff; color: #d5c9ff; }

@@ -17,6 +17,8 @@ import './extra.css'
 import './composer.css'
 import './nova-extras.css'
 import { extractPdfText } from './lib/pdf'
+import { LAYOUTS, loadLayout, saveLayout } from './lib/layout'
+import type { Layout } from './lib/layout'
 import { LANGS, QUICK, QUICK_KEYS, buildContext, cleanPrep, loadLang, loadLastPrep, loadPrep, MAX_PREP, savePrep, saveLang, srLang } from './lib/prep'
 import type { Lang, QuickKey } from './lib/prep'
 
@@ -116,6 +118,10 @@ function App() {
   const [prep, setPrep] = useState('')
   const prepRef = useRef('')
   const [prepOpen, setPrepOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [layout, setLayout] = useState<Layout>(() => loadLayout(store))
+  const [tab, setTab] = useState<'live' | 'transcript'>('live')
+  const [showConvo, setShowConvo] = useState(false)
   const [prepDraft, setPrepDraft] = useState('')
   const [prepReading, setPrepReading] = useState(false)
   const micRef = useRef<CloudMic | null>(null)
@@ -309,6 +315,7 @@ function App() {
       void askNova()
     }, 3000)
   }
+  function changeLayout(l: Layout) { setLayout(l); saveLayout(store, l) }
   function changeLang(l: Lang) { setChatLang(l); langRef.current = l; saveLang(store, l) }
   function openPrep() { setPrepDraft(prep); setPrepOpen(o => !o) }
   function commitPrep(text: string) {
@@ -339,7 +346,7 @@ function App() {
   useEffect(() => {
     const id = active?.id
     const v = id ? loadPrep(store, id) : ''
-    setPrep(v); prepRef.current = v; setPrepDraft(v); setPrepOpen(false)
+    setPrep(v); prepRef.current = v; setPrepDraft(v); setPrepOpen(false); setMenuOpen(false); setTab('live'); setShowConvo(false)
   }, [active?.id])
 
   function startListening() {
@@ -746,6 +753,59 @@ function App() {
 
   const latestAi = [...notes].reverse().find(n => n.kind === 'ai')
 
+  // ---- Live session layouts: chat feed, focus view, live + transcript tabs ----
+  const lastHeard = [...notes].reverse().find(n => n.kind === 'transcript')
+  const emptyHint = active ? (
+    <>Tap <strong>Listen</strong> and start talking.<br />NOVA writes down what it hears and offers {active.mode === 'Meeting' ? 'summaries' : 'answer ideas'} as you go.</>
+  ) : null
+  const thinkingLabel = active?.mode === 'Meeting' ? 'NOVA is summarizing' : 'NOVA is thinking'
+  const quickRow = (
+    <div className="quick-row">
+      {QUICK_KEYS.map(k => <button key={k} disabled={aiBusy} onClick={() => void askQuick(k)}>{QUICK[k].label}</button>)}
+    </div>
+  )
+  const renderFeed = (withQuick: boolean): ReactNode => !active ? null : (
+    <>
+      {notes.length === 0 && !interim && <div className="empty">{emptyHint}</div>}
+      {notes.map(n => n.kind === 'ai' ? (
+        <div className="bubble ai" key={n.id}>
+          <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div><div className="ai-title">{active.title}</div>{renderAi(n.content)}
+          {withQuick && n.id === latestAi?.id && quickRow}
+        </div>
+      ) : n.kind === 'screen' ? (
+        <div className="bubble screen" key={n.id}>
+          <div className="meta">◫ On screen</div>{renderAi(n.content)}
+        </div>
+      ) : (
+        <div className={`bubble ${n.kind}`} key={n.id}>
+          <div className="meta">{n.kind === 'transcript' ? 'Heard' : 'Your note'}</div>{n.content}
+        </div>
+      ))}
+      {interim && <div className="bubble transcript live"><div className="meta">Listening…</div>{interim}</div>}
+      {aiBusy && <Thinking label={thinkingLabel} />}
+      {readBusy && <Thinking label="NOVA is reading the screen" />}
+      <div ref={endRef} className="feed-end" />
+    </>
+  )
+  const latestCard = !active ? null : (
+    <div className="latest-card">
+      <div className="meta">✧ NOVA SUGGESTS{latestAi && <button className="copy" onClick={() => void copyText(latestAi.content)}>Copy</button>}</div>
+      {aiBusy ? <Thinking label={thinkingLabel} /> : latestAi ? (<><div className="focus-text">{renderAi(latestAi.content)}</div>{quickRow}</>) : <div className="empty">{emptyHint}</div>}
+    </div>
+  )
+  const heardStrip = (interim || lastHeard) ? (
+    <div className="focus-heard"><div className="meta">{interim ? 'Listening…' : 'Just heard'}</div>{interim || lastHeard?.content}</div>
+  ) : null
+  const meter = micLevel !== null ? (
+    <div className="mic-meter" role="status" aria-label="Microphone sound level">
+      <div className="mic-meter-bar">
+        <div className="mic-meter-fill" style={{ width: Math.min(100, Math.round(micLevel * 400)) + '%' }} />
+        <i className="mic-meter-tick" style={{ left: Math.round(MIC_MIN_PEAK * 400) + '%' }} />
+      </div>
+      <span>{micLevel >= MIC_MIN_PEAK ? 'Hearing sound' : 'No sound yet'}</span>
+    </div>
+  ) : null
+
   // ---- Windows desktop shell: shortcuts and the floating overlay ----
   async function noteAndAsk(text: string) {
     const a = activeRef.current
@@ -810,10 +870,12 @@ function App() {
       </aside>
 
       <main className="main">
-        <header className="topbar">
-          <span className="breadcrumb">Workspace / {crumb}</span>
-          <div className="system-status"><span className="status-dot" />Synced</div>
-        </header>
+        {!(view === 'sessions' && active) && (
+          <header className="topbar">
+            <span className="breadcrumb">Workspace / {crumb}</span>
+            <div className="system-status"><span className="status-dot" />Synced</div>
+          </header>
+        )}
         {notice && <div className="toast ok-toast"><span>{notice}</span></div>}
         {error && <div className="toast"><span>{error}</span><button className="ghost" onClick={() => setError('')}>✕</button></div>}
 
@@ -900,18 +962,35 @@ function App() {
         {view === 'sessions' && active && (
           <section className="session">
             <div className="session-head">
-              <button className="ghost" onClick={() => setActive(null)}>←</button>
-              <div className="grow"><h2>{active.title}</h2><small>{new Date(active.created_at).toLocaleString()}</small></div>
-              <span className="badge">{active.mode.toUpperCase()}</span>
-            </div>
-            <div className="session-tools">
-              <button className="ghost" onClick={() => void copyText(sessionText())}>⧉ Copy all</button>
-              <button className="ghost" onClick={exportTxt}>⇩ Export</button>
-              <LoadButton className="ghost" onClick={() => learnFrom(active, notes, true)}>✧ Learn</LoadButton>
-              <button className="ghost" onClick={openPrep}>{prep ? '📎 Prep ✓' : '📎 Prep'}</button>
-              <select className="lang-select" value={chatLang} onChange={e => changeLang(e.target.value as Lang)} aria-label="Language">
-                {LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-              </select>
+              <button className="ghost" onClick={() => setActive(null)} aria-label="Back to sessions">←</button>
+              <div className="grow">
+                <h2>{active.title}</h2>
+                <small><span className="status-dot" title="Synced" /> {new Date(active.created_at).toLocaleString()} <span className="badge">{active.mode.toUpperCase()}</span></small>
+              </div>
+              <button className="ghost menu-btn" onClick={() => setMenuOpen(o => !o)} aria-label="Menu" aria-expanded={menuOpen}>☰</button>
+              {menuOpen && (
+                <>
+                  <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
+                  <div className="menu-panel" role="menu">
+                    <button className="menu-item" role="menuitem" onClick={() => { setMenuOpen(false); void copyText(sessionText()) }}>⧉ Copy all</button>
+                    <button className="menu-item" role="menuitem" onClick={() => { setMenuOpen(false); exportTxt() }}>⇩ Export</button>
+                    <LoadButton className="menu-item" onClick={async () => { await learnFrom(active, notes, true); setMenuOpen(false) }}>✧ Learn</LoadButton>
+                    <button className="menu-item" role="menuitem" onClick={() => { setMenuOpen(false); openPrep() }}>{prep ? '📎 Prep ✓' : '📎 Prep'}</button>
+                    <label className="menu-item menu-row">
+                      <span>Language</span>
+                      <select className="lang-select" value={chatLang} onChange={e => { changeLang(e.target.value as Lang); setMenuOpen(false) }} aria-label="Language">
+                        {LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                      </select>
+                    </label>
+                    <label className="menu-item menu-row">
+                      <span>Layout</span>
+                      <select className="lang-select" value={layout} onChange={e => { changeLayout(e.target.value as Layout); setMenuOpen(false) }} aria-label="Layout">
+                        {LAYOUTS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                </>
+              )}
             </div>
             {prepOpen && (
               <div className="prep-panel">
@@ -929,52 +1008,35 @@ function App() {
               </div>
             )}
 
-            <div className="feed">
-              {notes.length === 0 && !interim && (
-                <div className="empty">
-                  Tap <strong>Listen</strong> and start talking.<br />
-                  NOVA writes down what it hears and offers {active.mode === 'Meeting' ? 'summaries' : 'answer ideas'} as you go.
-                </div>
-              )}
-              {notes.map(n => n.kind === 'ai' ? (
-                <div className="bubble ai" key={n.id}>
-                  <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div><div className="ai-title">{active.title}</div>{renderAi(n.content)}
-                  {n.id === latestAi?.id && (
-                    <div className="quick-row">
-                      {QUICK_KEYS.map(k => <button key={k} disabled={aiBusy} onClick={() => void askQuick(k)}>{QUICK[k].label}</button>)}
-                    </div>
-                  )}
-                </div>
-              ) : n.kind === 'screen' ? (
-                <div className="bubble screen" key={n.id}>
-                  <div className="meta">◫ On screen</div>{renderAi(n.content)}
-                </div>
-              ) : (
-                <div className={`bubble ${n.kind}`} key={n.id}>
-                  <div className="meta">{n.kind === 'transcript' ? 'Heard' : 'Your note'}</div>{n.content}
-                </div>
-              ))}
-              {interim && <div className="bubble transcript live"><div className="meta">Listening…</div>{interim}</div>}
-              {aiBusy && <Thinking label={active.mode === 'Meeting' ? 'NOVA is summarizing' : 'NOVA is thinking'} />}
-              {readBusy && <Thinking label="NOVA is reading the screen" />}
-              <div ref={endRef} className="feed-end" />
-            </div>
+            {layout === 'chat' && <div className="feed">{renderFeed(true)}</div>}
 
-            {micLevel !== null && (
-              <div className="mic-meter" role="status" aria-label="Microphone sound level">
-                <div className="mic-meter-bar">
-                  <div className="mic-meter-fill" style={{ width: Math.min(100, Math.round(micLevel * 400)) + '%' }} />
-                  <i className="mic-meter-tick" style={{ left: Math.round(MIC_MIN_PEAK * 400) + '%' }} />
-                </div>
-                <span>{micLevel >= MIC_MIN_PEAK ? 'Hearing sound' : 'No sound yet'}</span>
+            {layout === 'focus' && (
+              <div className="focus">
+                {latestCard}
+                {heardStrip}
+                <button className="ghost focus-more" onClick={() => setShowConvo(v => !v)}>{showConvo ? 'Hide conversation' : `Show conversation (${notes.length})`}</button>
+                {showConvo && <div className="feed">{renderFeed(false)}</div>}
               </div>
             )}
+
+            {layout === 'tabs' && (
+              <>
+                <div className="tabs-bar" role="tablist">
+                  <button role="tab" aria-selected={tab === 'live'} className={tab === 'live' ? 'on' : ''} onClick={() => setTab('live')}>Live</button>
+                  <button role="tab" aria-selected={tab === 'transcript'} className={tab === 'transcript' ? 'on' : ''} onClick={() => setTab('transcript')}>Transcript ({notes.length})</button>
+                </div>
+                {tab === 'live' ? <div className="focus">{latestCard}{heardStrip}</div> : <div className="feed">{renderFeed(false)}</div>}
+              </>
+            )}
+
+            {meter}
             <Dock
               mode={active.mode}
+              layout={layout}
               listening={listening} auto={auto} capturing={capturing} sharing={sharing} watching={watching}
               readBusy={readBusy} aiBusy={aiBusy} hasNotes={notes.length > 0}
               canListen={speechSupported || cloudMicSupported} canShare={canShare}
-              pin={latestAi ? renderAi(latestAi.content) : null}
+              pin={layout === 'chat' && latestAi ? renderAi(latestAi.content) : null}
               noteText={noteText}
               onNoteChange={setNoteText}
               onToggleListen={listening ? stopListening : startListening}
