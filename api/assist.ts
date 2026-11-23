@@ -262,4 +262,204 @@ interface TaskConfig {
 
 const TASKS: Record<TaskName, TaskConfig> = {
   assist: { system: (mode, style, ctx, today) => (PROMPTS[mode] || PROMPTS.Meeting) + MISHEARD + style + today + ctx, fastOnly: false, tokens: 2048, long: false, textChars: 12000 },
-  summary: { system: (_m, _s, ctx, today) => FULL_MEETING + MISHEARD + to
+  summary: { system: (_m, _s, ctx, today) => FULL_MEETING + MISHEARD + today + ctx, fastOnly: false, tokens: 4096, long: true, textChars: 150000 },
+  transcribe: { system: (_m, _s, ctx, _t) => TRANSCRIBE + (ctx ? SPELLING_HINT + ctx.slice(0, 1500) : ''), fastOnly: true, tokens: 1200, long: true, textChars: 12000 },
+  screen: { system: (_m, _s, _c, today) => SCREEN + today, fastOnly: false, tokens: 1500, long: true, textChars: 12000 },
+  learn: { system: (_m, _s, ctx, _t) => LEARN + MISHEARD_LEARN + ctx, fastOnly: true, tokens: 500, long: false, json: true, textChars: 12000 }
+}
+
+function isTask(v: unknown): v is TaskName {
+  return typeof v === 'string' && Object.prototype.hasOwnProperty.call(TASKS, v)
+}
+
+export default async function handler(req: any, res: any) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' })
+  const began = Date.now()
+
+  const url = process.env.VITE_SUPABASE_URL
+  const anon = process.env.VITE_SUPABASE_ANON_KEY
+  const apiKey = process.env.GEMINI_API_KEY
+  const anyBackup = backups().length > 0
+  if (!url || !anon || (!apiKey && !anyBackup)) return res.status(500).json({ error: 'Server is not configured' })
+
+  // Only signed-in users may spend AI credits.
+  const token = String(req.headers.authorization || '').replace('Bearer ', '').trim()
+  if (!token) return res.status(401).json({ error: 'Please sign in again' })
+  let account: any = cachedAccount(token)
+  if (!account) {
+    const who = await fetch(`${url}/auth/v1/user`, { headers: { apikey: anon, Authorization: `Bearer ${token}` } })
+    if (!who.ok) return res.status(401).json({ error: 'Please sign in again' })
+    account = await who.json().catch(() => ({}))
+    rememberAccount(token, account)
+  }
+  const prefs: any = account?.user_metadata?.settings ?? {}
+  const brain: Brain = prefs.brain === 'fast' ? 'fast' : 'smart'
+  const memories: string[] = Array.isArray(prefs.memories)
+    ? prefs.memories.filter((m: unknown) => typeof m === 'string').slice(0, 40).map((m: string) => m.trim().slice(0, 500)).filter(Boolean)
+    : []
+  const learnedFacts: string[] = Array.isArray(prefs.learned)
+    ? prefs.learned.filter((m: unknown) => typeof m === 'string').slice(-60).map((m: string) => m.trim().slice(0, 300)).filter(Boolean)
+    : []
+  const legacy = typeof prefs.about === 'string' ? prefs.about.trim().slice(0, 2000) : ''
+  const about = [...memories.map(m => `- ${m}`), ...learnedFacts.map(m => `- ${m}`), legacy].filter(Boolean).join('\n')
+  const userName = typeof account?.user_metadata?.display_name === 'string' ? account.user_metadata.display_name.trim().slice(0, 60) : ''
+
+  let body: any
+  try { body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body }
+  catch { return res.status(400).json({ error: 'Invalid request' }) }
+
+  const mode = body?.mode === 'Interview' ? 'Interview' : 'Meeting'
+  const audio = typeof body?.audio === 'string' && body.audio.length < 4200000 ? body.audio : ''
+  const audioMime = typeof body?.mime === 'string' && body.mime.startsWith('audio/') ? body.mime.split(';')[0] : 'audio/webm'
+  const image = typeof body?.image === 'string' && body.image.length < 4000000 ? body.image : ''
+  const lang = body?.lang === 'sw' || body?.lang === 'mixed' || body?.lang === 'en' ? body.lang : ''
+
+  // The app sends `task`. Older app versions sent flags (learn / audio / image / full), so still understand those.
+  let task: TaskName = isTask(body?.task)
+    ? body.task
+    : body?.learn === true ? 'learn' : audio ? 'transcribe' : image ? 'screen' : body?.full === true ? 'summary' : 'assist'
+  if (task === 'summary' && mode !== 'Meeting') task = 'assist' // full-transcript summaries are Meeting-only
+  const cfg = TASKS[task]
+
+  const style = body?.style === 'detailed' ? ' Give a fuller, more detailed answer.' : ' Keep it very short: at most 6 short lines.'
+  // Ignore malformed notes instead of crashing, and keep only the most recent ones.
+  const notes: { kind: string; content: string }[] = Array.isArray(body?.notes)
+    ? body.notes.slice(-400).filter((n: any) => n && typeof n.kind === 'string' && typeof n.content === 'string')
+    : []
+  const text = notes
+    .filter(n => n.kind !== 'ai')
+    .map(n => `${n.kind === 'transcript' ? 'HEARD' : n.kind === 'screen' ? 'ON SCREEN' : 'USER NOTE'}: ${n.content}`)
+    .join('\n')
+    .slice(-cfg.textChars)
+  const noInput = task === 'transcribe' ? !audio : task === 'screen' ? !image : !text.trim()
+  if (noInput) return res.status(400).json({ error: 'Nothing to analyze yet. Record or add notes first.' })
+
+  const context =
+    (userName ? `\n\nThe user's name is ${userName}.` : '') +
+    (about ? `\n\nBackground the user shared about themselves (use only when relevant; never invent beyond it):\n${about}` : '')
+  const langHint = task === 'transcribe'
+    ? lang === 'sw' ? ' The speech is in Kiswahili.' : lang === 'mixed' ? ' The speech may mix English and Kiswahili. Write each word in the language it was spoken in.' : ''
+    : task === 'assist' || task === 'summary'
+      ? lang === 'sw' ? ' The conversation is mainly in Kiswahili: reply in Kiswahili unless the user writes in English.' : lang === 'mixed' ? ' The conversation may mix English and Kiswahili: reply in the language of the latest question.' : ''
+      : ''
+  // Today's date, so "this Friday" or "by next week" can be understood. The app may send its time zone as `tz`.
+  let today = ''
+  try {
+    const tz = typeof body?.tz === 'string' && body.tz.length < 60 ? body.tz : 'Africa/Nairobi'
+    today = ` Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz })}.`
+  } catch { /* invalid time zone: leave the date out */ }
+  const system = cfg.system(mode, style, context, today) + langHint
+
+  const chain: Brain = cfg.fastOnly ? 'fast' : brain
+  const models = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL, ...MODELS[chain]] : MODELS[chain]
+  const level = chain === 'smart' ? 'medium' : 'low'
+  const limit = cfg.long ? 35000 : brain === 'smart' ? 25000 : 18000
+  const parts =
+    task === 'transcribe' ? [{ inlineData: { mimeType: audioMime, data: audio } }, { text: 'Transcribe this audio.' }]
+    : task === 'screen' ? [{ inlineData: { mimeType: 'image/jpeg', data: image } }, { text: 'Read this screen.' }]
+    : [{ text }]
+  const stop = new AbortController() // fired when a backup answers first, so Gemini stops working
+  const ask = (model: string, thinking: boolean) =>
+    fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': apiKey as string, 'content-type': 'application/json' },
+      signal: anySignal([AbortSignal.timeout(limit), stop.signal]),
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts }],
+        generationConfig: { maxOutputTokens: cfg.tokens, ...(cfg.json ? { responseMimeType: 'application/json' } : {}), ...(thinking ? { thinkingConfig: { thinkingLevel: level } } : {}) }
+      })
+    })
+
+  // Gemini: walk through its models until one answers.
+  const runGemini = async () => {
+    let r: any = null
+    if (!apiKey) return { r, data: {} as any, out: '' }
+    const start = Date.now()
+    for (const m of models) {
+      if (Date.now() - start > 30000 || stop.signal.aborted) break
+      const t0 = Date.now()
+      try {
+        r = await ask(m, true)
+        if (r.status === 400) r = await ask(m, false) // model may not support thinking levels
+        console.log(`assist task=${task} model=${m} brain=${brain} status=${r.status} ms=${Date.now() - t0}`)
+        if (r.ok) break
+      } catch (e: any) {
+        console.log('assist failed', task, m, e?.name, Date.now() - t0, 'ms')
+        r = null
+      }
+    }
+    const data: any = r ? await r.json().catch(() => ({})) : {}
+    const out = r?.ok ? (data.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join('').trim() : ''
+    return { r, data, out }
+  }
+
+  const runBackups = () => tryBackups({
+    task, system, text, image, audio, audioMime, lang,
+    tokens: cfg.tokens, wantsJson: Boolean(cfg.json),
+    deadline: began + 52000 // the function may run for 60 seconds
+  })
+
+  const canBackup = hasBackup(task)
+  const geminiCooling = canBackup && isCooling('gemini')
+
+  // If Gemini hit its limit a moment ago, go straight to the backups and keep Gemini as the last resort.
+  if (geminiCooling) {
+    const alt = await runBackups()
+    if (alt) return res.status(200).json({ text: alt.text, via: alt.via })
+  }
+
+  // Live answers: if Gemini has not replied after a few seconds, ask a backup provider as well and use whichever
+  // answers first. A slow or stuck Gemini then costs a few seconds instead of half a minute.
+  const hedgeMs = canBackup && !geminiCooling && (task === 'assist' || task === 'learn')
+    ? Number(process.env.NOVA_HEDGE_MS) || (brain === 'smart' ? 9000 : 5000)
+    : 0
+  let backupsTried = geminiCooling
+  let hit: Hit | null = null
+  let g: Awaited<ReturnType<typeof runGemini>>
+
+  if (hedgeMs) {
+    backupsTried = true
+    let backupP: Promise<Hit | null> | null = null
+    const startBackups = () => (backupP ??= runBackups().catch(() => null))
+    const geminiP = runGemini()
+    let tid: ReturnType<typeof setTimeout> | undefined
+    const slow = new Promise<'slow'>(resolve => { tid = setTimeout(() => resolve('slow'), hedgeMs) })
+    const first = await Promise.race([geminiP.then(() => 'done' as const), slow])
+    clearTimeout(tid)
+    if (first === 'done') {
+      g = await geminiP
+      hit = g.out ? { text: g.out, via: 'gemini' } : await startBackups() // Gemini failed quickly: use the backups
+    } else {
+      const bp = startBackups() // Gemini is slow: race a backup against it
+      hit = await new Promise<Hit | null>(resolve => {
+        let open = 2
+        const settle = (h: Hit | null) => { if (h) resolve(h); else if (--open === 0) resolve(null) }
+        geminiP.then(x => settle(x.out ? { text: x.out, via: 'gemini' } : null))
+        bp.then(settle)
+      })
+      if (hit && hit.via !== 'gemini') stop.abort() // a backup won: stop waiting for Gemini
+      g = await geminiP
+    }
+  } else {
+    g = await runGemini()
+    if (g.out) hit = { text: g.out, via: 'gemini' }
+  }
+
+  if (g.r?.status === 429) coolUntil.gemini = Date.now() + 120000
+  if (hit) return res.status(200).json({ text: hit.text, via: hit.via })
+
+  // Gemini is out of quota, too slow or failing: try the other free providers in order.
+  if (canBackup && !backupsTried) {
+    const alt = await runBackups()
+    if (alt) return res.status(200).json({ text: alt.text, via: alt.via })
+  }
+
+  if (!g.r) return res.status(apiKey ? 504 : 502).json({ error: apiKey ? 'The AI took too long to answer. Please try again.' : 'No AI provider could answer this. Try again shortly.' })
+  if (g.r.status === 429) return res.status(429).json({ error: canBackup ? 'The free AI limit is used up on every provider for now. It resets daily. Try again later.' : 'The free AI limit for today is used up on every model. It resets daily. To remove the limit, enable billing in Google AI Studio, or add another provider key in Vercel (GROQ_API_KEY).' })
+  if (!g.r.ok) {
+    console.log('assist gemini error', g.r.status, g.data?.error?.message) // kept in the server log, not sent to the browser
+    return res.status(502).json({ error: 'AI request failed. Please try again.' })
+  }
+  return res.status(502).json({ error: 'The AI returned no answer. Try again.' })
+}
