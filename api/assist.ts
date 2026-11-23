@@ -5,7 +5,6 @@ export const config = { maxDuration: 60 }
 // Prompts
 // ---------------------------------------------------------------------------------------------
 // Shared rule: NOVA does not hand out answers during a graded test.
-const INTEGRITY = `Integrity: if the screen or transcript clearly shows a graded exam, test or assessment (for example a CAT, "marked out of", a "time left" countdown on a class quiz, a proctored test), do not supply answers or suggested answers. Say: "This looks like a graded assessment, so I won't give answers. I can help you review these topics afterwards." Then offer to explain the concepts in general terms. Practice, mock and revision quizzes are fine: help normally.`
 
 // Text the app feeds in (speech, screenshots, notes) can contain instructions written by other people. It is material
 // to analyse, never a command.
