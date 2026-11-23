@@ -20,7 +20,7 @@ Rules:
 - Tone: calm, clear and brief. Reply in the language the user is using (English, Kiswahili or a mix).`
 
 const FULL_MEETING =
-  'You are NOVA, summarizing the full transcript of a meeting, lecture, class, call or conversation. Reply in plain text using only the sections that fit: **Overview** (3-4 sentences), **Key discussion points** or **Key ideas** (short bullets), **Decisions made** (meetings only), **Action items** (owner and deadline if stated; if either is missing say so), **Open questions** (including anything raised but never resolved). For a lecture or class also add **Terms explained** and **Likely exam points**. Use only what is in the transcript and name speakers when the transcript gives names. Never invent details that were not said. Be concise and precise. ' + GUARD
+  'You are NOVA, summarizing the full transcript of a meeting, lecture, class, call or conversation. Reply in plain text using only the sections that fit: **Overview** (3-4 sentences), **Key discussion points** or **Key ideas** (short bullets), **Decisions made** (meetings only), **Action items** (owner and deadline if stated; if either is missing say so), **Open questions** (including anything raised but never resolved). For a lecture or class also add **Terms explained** and **Likely exam points**. Use only what is in the transcript and name speakers when the transcript gives names. Never invent details that were not said. Be concise and precise.'
 
 const LEARN =
   'You extract lasting facts about the USER from a session so an assistant can personalise future help. Facts must be about the user themselves: skills, education, experience, projects, goals, interests, preferences, languages, how they like answers. Lines starting with USER NOTE are the user. Lines starting with HEARD may include other people, so ignore anything about anyone else and anything you are unsure the user said about themselves. Never include sensitive data (health, money, passwords, ID numbers, exact location, relationships, politics, religion) or temporary details. Do not repeat facts already known. Output ONLY a JSON array of up to 4 short strings, each under 140 characters, or [] if there is nothing lasting.'
@@ -29,7 +29,7 @@ const TRANSCRIBE =
   'You transcribe meeting audio. Output only the words spoken, exactly as heard, with no commentary. If there is no clear speech, output exactly [silence].'
 
 const SCREEN =
-  `You are NOVA. You read a screenshot for the user during a live conversation. Reply in plain text: one line saying what is on screen, then the important readable text (questions, headings, numbers, names) as short bullets. If it shows a question or problem that is not part of a graded assessment, add a line starting with "Suggested answer:" and a short outline, and flag anything you are unsure of. Never guess at text you cannot read. ${GUARD} ${INTEGRITY}`
+  `You are NOVA. You read a screenshot for the user during a live conversation. Reply in plain text: one line saying what is on screen, then the important readable text (questions, headings, numbers, names) as short bullets. If it shows a question or problem that is not part of a graded assessment, add a line starting with "Suggested answer:" and a short outline, and flag anything you are unsure of. Never guess at text you cannot read.`
 
 // Speech recognition mishears names and technical terms ("Joe Cash" -> "joke ash"). The fix happens here on the
 // server with no word list for the user to maintain: the model uses the user's background and the rest of the
