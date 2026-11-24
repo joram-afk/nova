@@ -32,28 +32,9 @@
 .menu-panel .menu-row { justify-content: space-between; cursor: default; }
 .menu-panel .menu-row:hover { background: transparent; }
 
-/* Layout: latest answer card (focus view and Live tab) */
-.focus { display: grid; gap: 10px; margin: 8px 0; }
-.latest-card { padding: 16px; background: #1a1730; border: 1px solid #a58aff; border-radius: 14px; }
-.latest-card .focus-text { font-size: 18px; line-height: 1.45; color: #f5f5f7; }
-.latest-card .empty { padding: 10px 0; }
-.focus-heard { padding: 10px 12px; background: #10131a; border: 1px solid #222630; border-radius: 12px; color: #c9cbd6; font-size: 14px; }
-.focus-more { justify-self: start; }
-
-/* Layout: Live / Transcript tabs */
-.tabs-bar { display: flex; gap: 6px; margin: 8px 0; }
-.tabs-bar button { flex: 1; padding: 9px 6px; background: transparent; border: 1px solid #2a2f3b; border-radius: 10px; color: #a5a9b7; font-size: 14px; }
-.tabs-bar button.on { background: #28223b; border-color: #a58aff; color: #d5c9ff; }
-
-/* Layout: dock controls */
 .dock-row.sub { display: flex; align-items: center; gap: 8px; }
-.focus-actions { display: grid; grid-template-columns: 1fr 1.3fr 1fr; gap: 8px; }
-.big-btn { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 52px; padding: 8px 6px; background: #10131a; border: 1px solid #222630; border-radius: 12px; color: #c9cbd6; font-size: 14px; text-align: center; cursor: pointer; }
-.big-btn:disabled { opacity: .5; cursor: default; }
-.big-btn.primary { background: #a991ff; border-color: #a991ff; color: #171321; font-weight: 600; }
-.big-btn.primary.on { background: #28223b; border-color: #a991ff; color: #d5c9ff; }
 
-/* Chat layout: one rounded input box (text on top; + / Auto on the left; mic and send on the right) */
+/* Chat input: one rounded box (text on top; + / Auto on the left; mic and send on the right) */
 .chatbox { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: #141824; border: 1px solid #2a2f3b; border-radius: 22px; }
 .chatbox:focus-within { border-color: #a58aff; }
 .chatbox-input { width: 100%; box-sizing: border-box; min-height: 28px; max-height: 140px; padding: 4px 2px; background: transparent; border: none; outline: none; resize: none; color: #f5f5f7; font: inherit; font-size: 16px; line-height: 1.4; }

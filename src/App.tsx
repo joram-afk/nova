@@ -17,8 +17,6 @@ import './extra.css'
 import './composer.css'
 import './nova-extras.css'
 import { extractPdfText } from './lib/pdf'
-import { LAYOUTS, loadLayout, saveLayout } from './lib/layout'
-import type { Layout } from './lib/layout'
 import { LANGS, QUICK, QUICK_KEYS, buildContext, cleanPrep, loadLang, loadLastPrep, loadPrep, MAX_PREP, savePrep, saveLang, srLang } from './lib/prep'
 import type { Lang, QuickKey } from './lib/prep'
 
@@ -119,9 +117,6 @@ function App() {
   const prepRef = useRef('')
   const [prepOpen, setPrepOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [layout, setLayout] = useState<Layout>(() => loadLayout(store))
-  const [tab, setTab] = useState<'live' | 'transcript'>('live')
-  const [showConvo, setShowConvo] = useState(false)
   const [prepDraft, setPrepDraft] = useState('')
   const [prepReading, setPrepReading] = useState(false)
   const micRef = useRef<CloudMic | null>(null)
@@ -315,7 +310,6 @@ function App() {
       void askNova()
     }, 3000)
   }
-  function changeLayout(l: Layout) { setLayout(l); saveLayout(store, l) }
   function changeLang(l: Lang) { setChatLang(l); langRef.current = l; saveLang(store, l) }
   function openPrep() { setPrepDraft(prep); setPrepOpen(o => !o) }
   function commitPrep(text: string) {
@@ -346,7 +340,7 @@ function App() {
   useEffect(() => {
     const id = active?.id
     const v = id ? loadPrep(store, id) : ''
-    setPrep(v); prepRef.current = v; setPrepDraft(v); setPrepOpen(false); setMenuOpen(false); setTab('live'); setShowConvo(false)
+    setPrep(v); prepRef.current = v; setPrepDraft(v); setPrepOpen(false); setMenuOpen(false)
   }, [active?.id])
 
   function startListening() {
@@ -753,8 +747,7 @@ function App() {
 
   const latestAi = [...notes].reverse().find(n => n.kind === 'ai')
 
-  // ---- Live session layouts: chat feed, focus view, live + transcript tabs ----
-  const lastHeard = [...notes].reverse().find(n => n.kind === 'transcript')
+  // ---- Live session: the chat feed ----
   const emptyHint = active ? (
     <>Tap <strong>Listen</strong> and start talking.<br />NOVA writes down what it hears and offers {active.mode === 'Meeting' ? 'summaries' : 'answer ideas'} as you go.</>
   ) : null
@@ -764,13 +757,13 @@ function App() {
       {QUICK_KEYS.map(k => <button key={k} disabled={aiBusy} onClick={() => void askQuick(k)}>{QUICK[k].label}</button>)}
     </div>
   )
-  const renderFeed = (withQuick: boolean): ReactNode => !active ? null : (
+  const renderFeed = (): ReactNode => !active ? null : (
     <>
       {notes.length === 0 && !interim && <div className="empty">{emptyHint}</div>}
       {notes.map(n => n.kind === 'ai' ? (
         <div className="bubble ai" key={n.id}>
           <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div><div className="ai-title">{active.title}</div>{renderAi(n.content)}
-          {withQuick && n.id === latestAi?.id && quickRow}
+          {n.id === latestAi?.id && quickRow}
         </div>
       ) : n.kind === 'screen' ? (
         <div className="bubble screen" key={n.id}>
@@ -787,15 +780,6 @@ function App() {
       <div ref={endRef} className="feed-end" />
     </>
   )
-  const latestCard = !active ? null : (
-    <div className="latest-card">
-      <div className="meta">✧ NOVA SUGGESTS{latestAi && <button className="copy" onClick={() => void copyText(latestAi.content)}>Copy</button>}</div>
-      {aiBusy ? <Thinking label={thinkingLabel} /> : latestAi ? (<><div className="focus-text">{renderAi(latestAi.content)}</div>{quickRow}</>) : <div className="empty">{emptyHint}</div>}
-    </div>
-  )
-  const heardStrip = (interim || lastHeard) ? (
-    <div className="focus-heard"><div className="meta">{interim ? 'Listening…' : 'Just heard'}</div>{interim || lastHeard?.content}</div>
-  ) : null
   const meter = micLevel !== null ? (
     <div className="mic-meter" role="status" aria-label="Microphone sound level">
       <div className="mic-meter-bar">
@@ -982,12 +966,6 @@ function App() {
                         {LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
                       </select>
                     </label>
-                    <label className="menu-item menu-row">
-                      <span>Layout</span>
-                      <select className="lang-select" value={layout} onChange={e => { changeLayout(e.target.value as Layout); setMenuOpen(false) }} aria-label="Layout">
-                        {LAYOUTS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-                      </select>
-                    </label>
                   </div>
                 </>
               )}
@@ -1008,35 +986,15 @@ function App() {
               </div>
             )}
 
-            {layout === 'chat' && <div className="feed">{renderFeed(true)}</div>}
-
-            {layout === 'focus' && (
-              <div className="focus">
-                {latestCard}
-                {heardStrip}
-                <button className="ghost focus-more" onClick={() => setShowConvo(v => !v)}>{showConvo ? 'Hide conversation' : `Show conversation (${notes.length})`}</button>
-                {showConvo && <div className="feed">{renderFeed(false)}</div>}
-              </div>
-            )}
-
-            {layout === 'tabs' && (
-              <>
-                <div className="tabs-bar" role="tablist">
-                  <button role="tab" aria-selected={tab === 'live'} className={tab === 'live' ? 'on' : ''} onClick={() => setTab('live')}>Live</button>
-                  <button role="tab" aria-selected={tab === 'transcript'} className={tab === 'transcript' ? 'on' : ''} onClick={() => setTab('transcript')}>Transcript ({notes.length})</button>
-                </div>
-                {tab === 'live' ? <div className="focus">{latestCard}{heardStrip}</div> : <div className="feed">{renderFeed(false)}</div>}
-              </>
-            )}
+            <div className="feed">{renderFeed()}</div>
 
             {meter}
             <Dock
               mode={active.mode}
-              layout={layout}
               listening={listening} auto={auto} capturing={capturing} sharing={sharing} watching={watching}
               readBusy={readBusy} aiBusy={aiBusy} hasNotes={notes.length > 0}
               canListen={speechSupported || cloudMicSupported} canShare={canShare}
-              pin={layout === 'chat' && latestAi ? renderAi(latestAi.content) : null}
+              pin={latestAi ? renderAi(latestAi.content) : null}
               noteText={noteText}
               onNoteChange={setNoteText}
               onToggleListen={listening ? stopListening : startListening}
