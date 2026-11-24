@@ -347,16 +347,18 @@ function App() {
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => {
       if ((!wantRef.current && !capStreamRef.current) || busyRef.current || Date.now() < pauseRef.current) return
-      if (Date.now() - lastAiRef.current < Math.max(settingsRef.current.interval, 20) * 1000) return
+      if (Date.now() - lastAiRef.current < 5000) return
       // Save the free AI quota: only fire when there is something worth answering.
       const list = notesRef.current
       let lastAi = -1
       list.forEach((n, i) => { if (n.kind === 'ai') lastAi = i })
       const heard = list.slice(lastAi + 1).filter(n => n.kind === 'transcript')
       if (!heard.length) return
-      const lastText = heard[heard.length - 1].content.toLowerCase().trim()
-      const isQuestion = /\?|^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|tell me|describe|explain|walk me)\b/.test(lastText)
-      if (!(isQuestion || (activeRef.current?.mode === 'Meeting' && heard.length >= 6))) return
+      // A chunk of speech can hold several sentences, so look at each one.
+      const startsLikeQuestion = /^(what|why|how|when|where|who|whom|whose|which|can|could|would|should|will|do|does|did|is|are|was|were|have|has|tell me|describe|explain|walk me|give me|define|compare|difference)\b/
+      const isQuestion = heard.some(h => /\?/.test(h.content) ||
+        h.content.toLowerCase().split(/[.!\n]+/).some(s => startsLikeQuestion.test(s.trim())))
+      if (!isQuestion) return
       void askNova()
     }, 3000)
   }
@@ -779,7 +781,7 @@ function App() {
     setAiBusy(true); setError('')
     try {
       const base = notesRef.current.map(n => ({ kind: n.kind, content: n.content }))
-      const full = base.reduce((n, x) => n + x.content.length, 0) > 12000
+      const full = false // every ask is answered directly; only importing a meeting writes a summary
       // prep, reply language and quick-reply instructions ride along with the request but are not saved as notes
       const list = [...base, ...buildContext({ prep: prepRef.current, lang: langRef.current, quick })]
       const text = await requestAi(a.mode, list, full)
@@ -820,7 +822,7 @@ function App() {
       {notes.length === 0 && !interim && <div className="empty">{emptyHint}</div>}
       {notes.map(n => n.kind === 'ai' ? (
         <div className="bubble ai" key={n.id}>
-          <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div><div className="ai-title">{active.title}</div>{renderAi(n.id === typingId ? fixPartial(typed) : n.content)}
+          <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div>{renderAi(n.id === typingId ? fixPartial(typed) : n.content)}
           {n.id === latestAi?.id && n.id !== typingId && quickRow}
         </div>
       ) : n.kind === 'screen' ? (
