@@ -42,6 +42,40 @@ const sessionGone = (e: { code?: string; message?: string } | null | undefined) 
   !!e && (e.code === '23503' || /foreign key/i.test(e.message || ''))
 const GONE_MESSAGE = 'This session no longer exists. Go back and start a new one.'
 
+// ---- Page addresses: /dashboard, /sessions, /profile, /settings ----
+const PATHS: Record<View, string> = { dashboard: '/dashboard', sessions: '/sessions', profile: '/profile', settings: '/settings' }
+// The Windows shell may load the app from a file, where changing the address would break it.
+const routed = typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
+function viewFromPath(p: string): View {
+  const seg = p.replace(/\/+$/, '').toLowerCase()
+  return (Object.keys(PATHS) as View[]).find(v => PATHS[v] === seg) ?? 'dashboard'
+}
+
+// ---- Typing effect: reveal an answer word by word, like someone writing it ----
+// While the text is half written, close an open **bold** so it never flashes as raw asterisks.
+function fixPartial(t: string): string {
+  const stars = (t.match(/\*\*/g) || []).length
+  if (stars % 2 === 0) return t.replace(/(^|[^*])\*$/, '$1')
+  return t.endsWith('**') ? t.slice(0, -2) : t + '**'
+}
+function useTypewriter(full: string, on: boolean, onDone: () => void): string {
+  const [n, setN] = useState(0)
+  useEffect(() => {
+    setN(0)
+    if (!on) return
+    const total = Math.min(5000, Math.max(900, full.length * 14)) // long answers speed up, so nobody waits long
+    const step = Math.max(1, Math.ceil(full.length / (total / 30)))
+    let i = 0
+    const id = setInterval(() => {
+      i += step
+      while (i < full.length && !/\s/.test(full[i])) i++ // finish the current word
+      if (i >= full.length) { clearInterval(id); setN(0); onDone() } else setN(i)
+    }, 30)
+    return () => clearInterval(id)
+  }, [full, on])
+  return on ? full.slice(0, n) : full
+}
+
 function renderAi(text: string): ReactNode {
   const inline = (s: string) =>
     s.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
@@ -61,7 +95,8 @@ function renderAi(text: string): ReactNode {
 function App() {
   const [auth, setAuth] = useState<AuthSession | null>(null)
   const [ready, setReady] = useState(false)
-  const [view, setView] = useState<View>('dashboard')
+  const [view, setViewState] = useState<View>(() => (routed ? viewFromPath(window.location.pathname) : 'dashboard'))
+  const [typingId, setTypingId] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('Meeting')
   const [sessions, setSessions] = useState<Row[]>([])
   const [active, setActive] = useState<Row | null>(null)
@@ -128,6 +163,20 @@ function App() {
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
 
+  function setView(v: View) {
+    setViewState(v)
+    if (routed && window.location.pathname !== PATHS[v]) window.history.pushState({}, '', PATHS[v])
+  }
+  useEffect(() => {
+    if (!routed) return
+    // "/" or an unknown address becomes /dashboard (the #hash and ?query are kept for sign-in and reset links)
+    const want = PATHS[viewFromPath(window.location.pathname)]
+    if (window.location.pathname !== want) window.history.replaceState({}, '', want + window.location.search + window.location.hash)
+    const onPop = () => setViewState(viewFromPath(window.location.pathname))
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
   useEffect(() => {
     if (!configured) { setReady(true); return }
     supabase.auth.getSession().then(({ data }) => { setAuth(data.session); setReady(true) })
@@ -164,6 +213,7 @@ function App() {
   useEffect(() => {
     const prev = activeRef.current
     if (prev && prev.id !== active?.id) void learnFrom(prev, notesRef.current)
+    setTypingId(null)
     stopListening() // saves any pending words to the session we are leaving
     stopShare()
     stopCapture()
@@ -733,9 +783,9 @@ function App() {
       // prep, reply language and quick-reply instructions ride along with the request but are not saved as notes
       const list = [...base, ...buildContext({ prep: prepRef.current, lang: langRef.current, quick })]
       const text = await requestAi(a.mode, list, full)
-      const { error } = await supabase.from('notes').insert({ session_id: a.id, content: text, kind: 'ai' })
+      const { data: saved, error } = await supabase.from('notes').insert({ session_id: a.id, content: text, kind: 'ai' }).select('id').single()
       if (error) { if (!sessionGone(error)) throw new Error(error.message) }
-      else await loadNotes(a.id)
+      else { if (saved?.id) setTypingId(saved.id as string); await loadNotes(a.id) }
     } catch (e) {
       const m = e instanceof Error ? e.message : 'AI request failed'
       if (/quota|limit/i.test(m)) pauseRef.current = Date.now() + 10 * 60 * 1000
@@ -746,6 +796,14 @@ function App() {
   }
 
   const latestAi = [...notes].reverse().find(n => n.kind === 'ai')
+  const typingNote = typingId ? notes.find(n => n.id === typingId) : undefined
+  const typed = useTypewriter(typingNote?.content ?? '', !!typingNote, () => setTypingId(null))
+  // keep the newest line in view while it is being written
+  useEffect(() => {
+    if (!typingNote) return
+    const nearBottom = document.body.scrollHeight - (window.scrollY + window.innerHeight) < 450
+    if (nearBottom) endRef.current?.scrollIntoView({ block: 'end' })
+  }, [typed])
 
   // ---- Live session: the chat feed ----
   const emptyHint = active ? (
@@ -762,8 +820,8 @@ function App() {
       {notes.length === 0 && !interim && <div className="empty">{emptyHint}</div>}
       {notes.map(n => n.kind === 'ai' ? (
         <div className="bubble ai" key={n.id}>
-          <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div><div className="ai-title">{active.title}</div>{renderAi(n.content)}
-          {n.id === latestAi?.id && quickRow}
+          <div className="meta">✧ NOVA<button className="copy" onClick={() => void copyText(n.content)}>Copy</button></div><div className="ai-title">{active.title}</div>{renderAi(n.id === typingId ? fixPartial(typed) : n.content)}
+          {n.id === latestAi?.id && n.id !== typingId && quickRow}
         </div>
       ) : n.kind === 'screen' ? (
         <div className="bubble screen" key={n.id}>
@@ -994,7 +1052,7 @@ function App() {
               listening={listening} auto={auto} capturing={capturing} sharing={sharing} watching={watching}
               readBusy={readBusy} aiBusy={aiBusy} hasNotes={notes.length > 0}
               canListen={speechSupported || cloudMicSupported} canShare={canShare}
-              pin={latestAi ? renderAi(latestAi.content) : null}
+              pin={latestAi ? renderAi(latestAi.id === typingId ? fixPartial(typed) : latestAi.content) : null}
               noteText={noteText}
               onNoteChange={setNoteText}
               onToggleListen={listening ? stopListening : startListening}
