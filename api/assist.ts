@@ -7,9 +7,11 @@ export const config = { maxDuration: 60 }
 
 
 // Base behaviour shared by the live modes (Meeting, Interview).
-const CORE = `You are NOVA, a real-time AI assistant for meetings, interviews and learning. You receive transcripts and screen captures from the user's session and help them in the moment.
+const CORE = `You are NOVA, a smart, friendly AI assistant that works live: in meetings, interviews, classes, calls and everyday life. You can answer any question on any subject. You may receive transcripts, notes and screen captures from the user's session, and you help them in the moment.
 
 Rules:
+- Answer any question, on any subject, the way a knowledgeable friend would: directly and completely, with a length that fits the question (one line for a simple question, more for a hard one). Do not refuse or deflect ordinary requests: school work, maths, statistics, coding, writing, health, law, money, relationships, daily life. When asked for code, write it straight away. Only if a request would seriously harm someone or is clearly illegal, decline briefly and offer a safer alternative.
+- For recent events or live facts you cannot verify (news, prices, scores, who currently holds a role), say what you know, say it may be out of date, and say what to check.
 - Lead with the answer or the most useful point. No preamble.
 - Accuracy over speed. If you are not sure, say "Not certain:" and say what to verify. Never invent facts, names, numbers or quotes.
 - For claims about the session, use only the transcript, screen or notes. Use general knowledge for everything else, and say which is which when it matters.
@@ -47,6 +49,25 @@ const SPELLING_HINT =
 // and the assistant should think past the obvious answer.
 const WIDE =
   ' The setting can be anything in daily life, not only a meeting or an interview: a lecture or class, a phone call, a chat with family or friends, shopping, travel, a negotiation, a visit to a doctor or bank, a debate, a game, a repair, cooking, a business idea, or something else. First work out what is really going on (who is speaking, what each person wants, what is at stake) and do not assume the mode name describes the situation. Be genuinely smart: go beyond the obvious and offer the angle the user would not think of, such as a hidden assumption, a sharper question to ask, a risk or opportunity others would miss, or a creative alternative. When it adds real value, end with one line starting **Another angle:** with that idea, and skip it when there is nothing worth adding. When a question is asked, answer it directly and correctly first, even if it is general knowledge. For medical, legal or money topics give clear, useful information and say briefly when a professional should be consulted. In negotiations or sales, point out leverage, hidden costs and what to ask before agreeing.'
+
+// NOVA's own earlier replies are sent as "NOVA SAID" lines so follow-ups work ("explain that simply", "what did you mean").
+const MEMORY_RULE =
+  ' Lines starting with NOVA SAID are your own earlier replies in this conversation. They are memory only. Use them when the user asks about them or follows up on them (for example "explain that", "shorter", "what did you mean", "give an example"). Otherwise ignore them. Never repeat, recap or summarize them unless the user asks. Always answer the latest HEARD, USER NOTE or ON SCREEN line. If the very last line is one of your own replies, the user asked again: answer the most recent HEARD or USER NOTE line afresh, with something new or clearer, not the same wording.'
+
+// Live facts (news, prices, scores, current office holders) need a search. Only questions that look like that use it.
+const SEARCH_HINT = /\b(today|tonight|yesterday|tomorrow|right now|currently|latest|recent(ly)?|news|headlines?|breaking|this (week|month|year|weekend)|last (week|month|night)|20(2[4-9]|3\d)|price of|prices|exchange rate|stock|share price|score|fixtures?|standings|weather|forecast|who is the (current |new )?(president|prime minister|ceo|governor|mayor|minister|king|queen|champion|coach)|who won|just (released|launched|announced)|trending|election results?|inflation rate|interest rate|bitcoin|nse|kes)\b/i
+const needsSearch = (message: string) => SEARCH_HINT.test(message)
+const SEARCH_RULE = ' You have Google Search for this question. Use it for current facts. Answer directly, and name the main source sites briefly. If the results are unclear or conflict, say so.'
+
+// Search needs a Gemini 2.x model on free keys (Gemini 3 has no free search allowance). Change it with GEMINI_SEARCH_MODEL.
+const SEARCH_MODEL = process.env.GEMINI_SEARCH_MODEL || 'gemini-2.5-flash'
+
+// Adds the source sites Google found, as a short line under a searched answer.
+function withSources(text: string, data: any): string {
+  const chunks: any[] = data?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []
+  const names = [...new Set(chunks.map(c => String(c?.web?.title || '').trim()).filter(Boolean))].slice(0, 3)
+  return names.length ? `${text}\n\nSources: ${names.join(', ')}` : text
+}
 
 const PROMPTS: Record<string, string> = {
   Meeting:
@@ -254,7 +275,7 @@ interface TaskConfig {
 }
 
 const TASKS: Record<TaskName, TaskConfig> = {
-  assist: { system: (mode, style, ctx, today) => (PROMPTS[mode] || PROMPTS.Meeting) + MISHEARD + style + today + ctx, fastOnly: false, tokens: 2048, long: false, textChars: 12000 },
+  assist: { system: (mode, style, ctx, today) => (PROMPTS[mode] || PROMPTS.Meeting) + MEMORY_RULE + MISHEARD + style + today + ctx, fastOnly: false, tokens: 2048, long: false, textChars: 40000 },
   summary: { system: (_m, _s, ctx, today) => FULL_MEETING + MISHEARD + today + ctx, fastOnly: false, tokens: 4096, long: true, textChars: 150000 },
   transcribe: { system: (_m, _s, ctx, _t) => TRANSCRIBE + (ctx ? SPELLING_HINT + ctx.slice(0, 1500) : ''), fastOnly: true, tokens: 1200, long: true, textChars: 12000 },
   screen: { system: (_m, _s, _c, today) => SCREEN + today, fastOnly: false, tokens: 1500, long: true, textChars: 12000 },
@@ -319,12 +340,18 @@ export default async function handler(req: any, res: any) {
   const notes: { kind: string; content: string }[] = Array.isArray(body?.notes)
     ? body.notes.slice(-400).filter((n: any) => n && typeof n.kind === 'string' && typeof n.content === 'string')
     : []
+  // Live answers see the whole conversation, including NOVA's own earlier replies, so follow-ups work.
+  // Summaries and "learn" only read what the user and others said.
+  const withReplies = task === 'assist'
+  const label = (n: { kind: string }) => n.kind === 'ai' ? 'NOVA SAID' : n.kind === 'transcript' ? 'HEARD' : n.kind === 'screen' ? 'ON SCREEN' : 'USER NOTE'
   const text = notes
-    .filter(n => n.kind !== 'ai')
-    .map(n => `${n.kind === 'transcript' ? 'HEARD' : n.kind === 'screen' ? 'ON SCREEN' : 'USER NOTE'}: ${n.content}`)
+    .filter(n => withReplies || n.kind !== 'ai')
+    .map(n => `${label(n)}: ${n.content}`)
     .join('\n')
     .slice(-cfg.textChars)
-  const noInput = task === 'transcribe' ? !audio : task === 'screen' ? !image : !text.trim()
+  const latestMessage = [...notes].reverse().find(n => n.kind !== 'ai')?.content ?? ''
+  const hasUserLine = notes.some(n => n.kind !== 'ai')
+  const noInput = task === 'transcribe' ? !audio : task === 'screen' ? !image : !hasUserLine || !text.trim()
   if (noInput) return res.status(400).json({ error: 'Nothing to analyze yet. Record or add notes first.' })
 
   const context =
@@ -352,14 +379,16 @@ export default async function handler(req: any, res: any) {
     : task === 'screen' ? [{ inlineData: { mimeType: 'image/jpeg', data: image } }, { text: 'Read this screen.' }]
     : [{ text }]
   const stop = new AbortController() // fired when a backup answers first, so Gemini stops working
-  const ask = (model: string, thinking: boolean) =>
+  const wantsSearch = task === 'assist' && Boolean(apiKey) && !isCooling('gemini-search') && needsSearch(latestMessage)
+  const ask = (model: string, thinking: boolean, search = false) =>
     fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: 'POST',
       headers: { 'x-goog-api-key': apiKey as string, 'content-type': 'application/json' },
       signal: anySignal([AbortSignal.timeout(limit), stop.signal]),
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
+        systemInstruction: { parts: [{ text: search ? system + SEARCH_RULE : system }] },
         contents: [{ role: 'user', parts }],
+        ...(search ? { tools: [{ google_search: {} }] } : {}),
         generationConfig: { maxOutputTokens: cfg.tokens, ...(cfg.json ? { responseMimeType: 'application/json' } : {}), ...(thinking ? { thinkingConfig: { thinkingLevel: level } } : {}) }
       })
     })
@@ -369,6 +398,22 @@ export default async function handler(req: any, res: any) {
     let r: any = null
     if (!apiKey) return { r, data: {} as any, out: '' }
     const start = Date.now()
+    if (wantsSearch) {
+      const s0 = Date.now()
+      try {
+        const sr = await ask(SEARCH_MODEL, false, true)
+        console.log(`assist task=${task} model=${SEARCH_MODEL} search=true status=${sr.status} ms=${Date.now() - s0}`)
+        if (sr.ok) {
+          const sd: any = await sr.json().catch(() => ({}))
+          const answer = (sd.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join('').trim()
+          if (answer) return { r: sr, data: sd, out: withSources(answer, sd) }
+        } else {
+          coolUntil['gemini-search'] = Date.now() + 10 * 60000 // free keys often have no search allowance: stop trying for a while
+        }
+      } catch (e: any) {
+        console.log('assist search failed', e?.name, Date.now() - s0, 'ms')
+      }
+    }
     for (const m of models) {
       if (Date.now() - start > 30000 || stop.signal.aborted) break
       const t0 = Date.now()
@@ -405,7 +450,7 @@ export default async function handler(req: any, res: any) {
   // Live answers: if Gemini has not replied after a few seconds, ask a backup provider as well and use whichever
   // answers first. A slow or stuck Gemini then costs a few seconds instead of half a minute.
   const hedgeMs = canBackup && !geminiCooling && (task === 'assist' || task === 'learn')
-    ? Number(process.env.NOVA_HEDGE_MS) || (brain === 'smart' ? 9000 : 5000)
+    ? (Number(process.env.NOVA_HEDGE_MS) || (brain === 'smart' ? 9000 : 5000)) + (wantsSearch ? 6000 : 0)
     : 0
   let backupsTried = geminiCooling
   let hit: Hit | null = null
