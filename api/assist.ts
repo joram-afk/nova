@@ -31,7 +31,11 @@ const TRANSCRIBE =
   'You transcribe meeting audio. Output only the words spoken, exactly as heard, with no commentary. If there is no clear speech, output exactly [silence].'
 
 const SCREEN =
-  `You are NOVA. You read a screenshot for the user during a live conversation. Reply in plain text: one line saying what is on screen, then the important readable text (questions, headings, numbers, names) as short bullets. If it shows a question or problem that is not part of a graded assessment, add a line starting with "Suggested answer:" and a short outline, and flag anything you are unsure of. Never guess at text you cannot read.`
+  `You are NOVA. You read a screenshot for the user during a live conversation. Reply in plain text: one line saying what is on screen, then the important readable text (questions, headings, numbers, names) as short bullets. If it shows a question or problem, add a line starting with "Suggested answer:" and a short outline, and flag anything you are unsure of. Never guess at text you cannot read.`
+
+// A photo or screenshot the user shares on purpose. Like a typed message, it gets a direct answer.
+const IMAGE_ANSWER =
+  ` The user shared an image or screenshot. Work out what they need and reply directly, like a smart friend. Start with one short bold line saying what the image is (for example **Question 3 from a statistics quiz** or **Error message in a Python script**), so it can be referred to later. Then: if the image contains a question, problem, exercise, code, error message, message to reply to, or anything that clearly asks for an answer, answer it directly and correctly. For a problem, show the steps and give the final answer. For a multiple-choice question, name the correct option and say why. For code or an error, explain the cause and give the fix. If several questions are visible and the conversation does not say which one, answer them all briefly, in order. If the image has no question, say in one or two lines what it shows and give the most useful point about it. The conversation so far is context only: if the user's last message says which question to answer or what to do with the image, follow that. Read the text with care and say plainly which part you cannot read instead of guessing. Never just transcribe the image.`
 
 // Speech recognition mishears names and technical terms ("Joe Cash" -> "joke ash"). The fix happens here on the
 // server with no word list for the user to maintain: the model uses the user's background and the rest of the
@@ -209,13 +213,13 @@ async function groqTranscribe(job: BackupJob): Promise<string | null> {
 }
 
 async function backupChat(job: BackupJob): Promise<{ text: string; via: string } | null> {
-  const wantsImage = job.task === 'screen'
+  const wantsImage = job.task === 'screen' || job.task === 'image'
   for (const b of backups()) {
     if (isCooling(b.key)) continue
     const models = wantsImage ? b.vision : b.models
     if (!models.length) continue
     const user: any = wantsImage
-      ? [{ type: 'text', text: 'Read this screen.' }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${job.image}` } }]
+      ? [{ type: 'text', text: job.task === 'image' ? (job.text.trim() ? `Conversation so far (context only):\n${job.text.slice(-BACKUP_TEXT_CHARS)}\n\nNow answer the image.` : 'Answer this image.') : 'Read this screen.' }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${job.image}` } }]
       : job.text.slice(-BACKUP_TEXT_CHARS)
     for (const model of models) {
       const ms = Math.min(20000, remaining(job))
@@ -249,7 +253,7 @@ async function backupChat(job: BackupJob): Promise<{ text: string; via: string }
 // Is there any backup that could handle this kind of job?
 function hasBackup(task: TaskName): boolean {
   if (task === 'transcribe') return Boolean(process.env.GROQ_API_KEY)
-  return backups().some(b => (task === 'screen' ? b.vision : b.models).length > 0)
+  return backups().some(b => (task === 'screen' || task === 'image' ? b.vision : b.models).length > 0)
 }
 
 async function tryBackups(job: BackupJob): Promise<{ text: string; via: string } | null> {
@@ -263,7 +267,7 @@ async function tryBackups(job: BackupJob): Promise<{ text: string; via: string }
 // ---------------------------------------------------------------------------------------------
 // Tasks. To add a new kind of AI job, add one entry here and send its name as `task` from the app.
 // ---------------------------------------------------------------------------------------------
-type TaskName = 'assist' | 'summary' | 'transcribe' | 'screen' | 'learn'
+type TaskName = 'assist' | 'summary' | 'transcribe' | 'screen' | 'image' | 'learn'
 
 interface TaskConfig {
   system: (mode: string, style: string, context: string, today: string) => string
@@ -279,6 +283,7 @@ const TASKS: Record<TaskName, TaskConfig> = {
   summary: { system: (_m, _s, ctx, today) => FULL_MEETING + MISHEARD + today + ctx, fastOnly: false, tokens: 4096, long: true, textChars: 150000 },
   transcribe: { system: (_m, _s, ctx, _t) => TRANSCRIBE + (ctx ? SPELLING_HINT + ctx.slice(0, 1500) : ''), fastOnly: true, tokens: 1200, long: true, textChars: 12000 },
   screen: { system: (_m, _s, _c, today) => SCREEN + today, fastOnly: false, tokens: 1500, long: true, textChars: 12000 },
+  image: { system: (_m, style, ctx, today) => CORE + IMAGE_ANSWER + MEMORY_RULE + style + today + ctx, fastOnly: false, tokens: 2048, long: true, textChars: 8000 },
   learn: { system: (_m, _s, ctx, _t) => LEARN + MISHEARD_LEARN + ctx, fastOnly: true, tokens: 500, long: false, json: true, textChars: 12000 }
 }
 
@@ -342,7 +347,7 @@ export default async function handler(req: any, res: any) {
     : []
   // Live answers see the whole conversation, including NOVA's own earlier replies, so follow-ups work.
   // Summaries and "learn" only read what the user and others said.
-  const withReplies = task === 'assist'
+  const withReplies = task === 'assist' || task === 'image'
   const label = (n: { kind: string }) => n.kind === 'ai' ? 'NOVA SAID' : n.kind === 'transcript' ? 'HEARD' : n.kind === 'screen' ? 'ON SCREEN' : 'USER NOTE'
   const text = notes
     .filter(n => withReplies || n.kind !== 'ai')
@@ -351,7 +356,7 @@ export default async function handler(req: any, res: any) {
     .slice(-cfg.textChars)
   const latestMessage = [...notes].reverse().find(n => n.kind !== 'ai')?.content ?? ''
   const hasUserLine = notes.some(n => n.kind !== 'ai')
-  const noInput = task === 'transcribe' ? !audio : task === 'screen' ? !image : !hasUserLine || !text.trim()
+  const noInput = task === 'transcribe' ? !audio : task === 'screen' || task === 'image' ? !image : !hasUserLine || !text.trim()
   if (noInput) return res.status(400).json({ error: 'Nothing to analyze yet. Record or add notes first.' })
 
   const context =
@@ -377,6 +382,7 @@ export default async function handler(req: any, res: any) {
   const parts =
     task === 'transcribe' ? [{ inlineData: { mimeType: audioMime, data: audio } }, { text: 'Transcribe this audio.' }]
     : task === 'screen' ? [{ inlineData: { mimeType: 'image/jpeg', data: image } }, { text: 'Read this screen.' }]
+    : task === 'image' ? [{ inlineData: { mimeType: 'image/jpeg', data: image } }, { text: text.trim() ? `Conversation so far (context only):\n${text}\n\nNow answer the image.` : 'Answer this image.' }]
     : [{ text }]
   const stop = new AbortController() // fired when a backup answers first, so Gemini stops working
   const wantsSearch = task === 'assist' && Boolean(apiKey) && !isCooling('gemini-search') && needsSearch(latestMessage)
