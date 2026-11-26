@@ -835,7 +835,7 @@ function App() {
 
   // ---- Live session: the chat feed ----
   const emptyHint = active ? (
-    <>Tap <strong>Listen</strong> and start talking.<br />NOVA writes down what it hears and offers {active.mode === 'Meeting' ? 'summaries' : 'answer ideas'} as you go.</>
+    <>Tap <strong>mic</strong> and start talking.<br />NOVA writes down what it hears and offers {active.mode === 'Meeting' ? 'summaries' : 'answer ideas'} as you go.</>
   ) : null
   const thinkingLabel = active?.mode === 'Meeting' ? 'NOVA is summarizing' : 'NOVA is thinking'
   const quickRow = (
