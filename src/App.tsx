@@ -580,33 +580,59 @@ function App() {
         if (diff / sig.length < 10) return // screen did not change much
       }
     }
-    await readImage(toJpeg(v, v.videoWidth, v.videoHeight))
+    await readImage(toJpeg(v, v.videoWidth, v.videoHeight), !onlyIfChanged)
   }
   async function readFile(f: File) {
     const url = URL.createObjectURL(f)
     try {
       const img = new Image(); img.src = url; await img.decode()
-      await readImage(toJpeg(img, img.naturalWidth, img.naturalHeight))
+      await readImage(toJpeg(img, img.naturalWidth, img.naturalHeight), true)
     } catch { setError('Could not open that image.') }
     URL.revokeObjectURL(url)
   }
-  async function readImage(b64: string) {
+  // answer = true: the user shared this image on purpose, so NOVA answers it directly (like a typed message).
+  // answer = false: automatic screen watching, which only notes what is on screen as background.
+  async function readImage(b64: string, answer = false) {
     const a = activeRef.current
     if (!a || readBusyRef.current) return
     readBusyRef.current = true; setReadBusy(true)
     try {
       const { data: s } = await supabase.auth.getSession()
+      const body = answer
+        ? {
+            task: 'image', mode: a.mode, image: b64, style: settingsRef.current.style,
+            // the recent conversation, plus background and language, so "solve number 3" or Kiswahili replies are respected
+            notes: [...notesRef.current.slice(-12).map(n => ({ kind: n.kind, content: n.content })), ...buildContext({ prep: prepRef.current, lang: langRef.current, quick: null })]
+          }
+        : { mode: a.mode, image: b64 }
       const r = await fetch('/api/assist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.session?.access_token ?? ''}` },
-        body: JSON.stringify({ mode: a.mode, image: b64 })
+        body: JSON.stringify(body)
       })
       const j = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(j.error || 'Could not read the screen')
-      const { error } = await supabase.from('notes').insert({ session_id: a.id, content: j.text, kind: 'screen' })
-      if (error) { if (!sessionGone(error)) throw new Error(error.message) }
-      else await loadNotes(a.id)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not read the screen') }
+      if (!r.ok) throw new Error(j.error || 'Could not read the image')
+      const text = String(j.text ?? '').trim()
+      if (!text) throw new Error('The AI returned no answer. Try again.')
+      if (answer) {
+        // a small marker for the image, then NOVA's answer, typed out like any other reply
+        const first = await supabase.from('notes').insert({ session_id: a.id, content: '▣ Image shared', kind: 'note' })
+        if (first.error) { if (!sessionGone(first.error)) throw new Error(first.error.message) }
+        else {
+          const { data: saved, error } = await supabase.from('notes').insert({ session_id: a.id, content: text, kind: 'ai' }).select('id').single()
+          if (error) { if (!sessionGone(error)) throw new Error(error.message) }
+          else { if (saved?.id) setTypingId(saved.id as string); if (activeRef.current?.id === a.id) await loadNotes(a.id) }
+        }
+      } else {
+        const { error } = await supabase.from('notes').insert({ session_id: a.id, content: text, kind: 'screen' })
+        if (error) { if (!sessionGone(error)) throw new Error(error.message) }
+        else await loadNotes(a.id)
+      }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : 'Could not read the image'
+      if (/quota|limit/i.test(m)) pauseRef.current = Date.now() + 10 * 60 * 1000
+      setError(m)
+    }
     readBusyRef.current = false; setReadBusy(false)
   }
   // Meeting audio (Zoom, Meet, Teams...): capture the shared screen/tab sound, cut it into chunks,
@@ -836,7 +862,7 @@ function App() {
       ))}
       {interim && <div className="bubble transcript live"><div className="meta">Listening…</div>{interim}</div>}
       {aiBusy && <Thinking label={thinkingLabel} />}
-      {readBusy && <Thinking label="NOVA is reading the screen" />}
+      {readBusy && <Thinking label="NOVA is reading the image" />}
       <div ref={endRef} className="feed-end" />
     </>
   )
