@@ -1059,7 +1059,7 @@ function App() {
             {prepOpen && (
               <div className="prep-panel">
                 <p>Load a PDF or text file, or paste your CV, the job description or any notes. NOVA uses them to tailor its answers in this session.</p>
-                <textarea value={prepDraft} maxLength={MAX_PREP} onChange={e => setPrepDraft(e.target.value)} placeholder="e.g. I am a data analyst with 3 years of experience. The job is…" />
+                <textarea value={prepDraft} maxLength={MAX_PREP} onChange={e => setPrepDraft(e.target.value)} placeholder="your description..." />
                 <div className="prep-row">
                   <button className="ghost" onClick={() => { commitPrep(prepDraft); setPrepOpen(false) }}>Save</button>
                   <label className="ghost" style={{ cursor: 'pointer' }}>{prepReading ? 'Reading PDF…' : 'Load PDF or .txt'}
