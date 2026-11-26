@@ -837,7 +837,7 @@ function App() {
   const emptyHint = active ? (
     <>Tap <strong>mic</strong> and start talking.<br />NOVA writes down what it hears and offers {active.mode === 'Meeting' ? 'summaries' : 'answer ideas'} as you go.</>
   ) : null
-  const thinkingLabel = active?.mode === 'Meeting' ? 'NOVA is summarizing' : 'NOVA is thinking'
+  const thinkingLabel = active?.mode === 'Meeting' ? 'Just a second' : 'NOVA is thinking'
   const quickRow = (
     <div className="quick-row">
       {QUICK_KEYS.map(k => <button key={k} disabled={aiBusy} onClick={() => void askQuick(k)}>{QUICK[k].label}</button>)}
